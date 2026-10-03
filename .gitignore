@@ -14,3 +14,7 @@ recordings/
 
 # собранные датасеты (python -m analysis.dataset 2026)
 data/
+
+# настройки ИИ-ассистента — локальные
+CLAUDE.md
+.claude/
