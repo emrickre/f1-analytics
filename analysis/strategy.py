@@ -20,7 +20,9 @@ def pit_loss(raw_race, clean_race):
     losses = []
     for (drv, lap), row in laps[laps['is_in_lap']].iterrows():
         nxt = laps.loc[(drv, lap + 1)] if (drv, lap + 1) in laps.index else None
-        if nxt is None or drv not in med or row['neutralised'] or nxt['neutralised']:
+        # pd.notna, а не truthiness: в pandas 3 пустое значение строки — NaN.
+        if nxt is None or drv not in med or pd.notna(row['neutralised']) \
+                or pd.notna(nxt['neutralised']):
             continue
         t = row['lap_time'] + nxt['lap_time'] - 2 * med[drv]
         if np.isfinite(t) and 5 < t < 60:
