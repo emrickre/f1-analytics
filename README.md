@@ -1,6 +1,31 @@
 # F1 Analytics
 
+[![tests](https://github.com/emrickre/f1-analytics/actions/workflows/tests.yml/badge.svg)](https://github.com/emrickre/f1-analytics/actions/workflows/tests.yml)
+
 Анализ данных Формулы-1 через [FastF1](https://docs.fastf1.dev/).
+
+## Анализ: деградация шин и стратегия пит-стопов
+
+📓 **[notebooks/tyre_degradation.ipynb](notebooks/tyre_degradation.ipynb)** — все гонки
+сезона 2026 из OpenF1, ~13,7 тыс. чистых кругов, смешанная модель (statsmodels).
+
+Главные выводы:
+- наивная модель по сезону говорит, что SOFT изнашивается медленнее MEDIUM, — это
+  парадокс Симпсона: SOFT используют на трассах с низким износом;
+- внутри одной гонки составы деградируют почти одинаково, **решает трасса**
+  (от ≈0 до 0,15 с/круг);
+- прогноз времени круга внутри стинта: средняя по сезону деградация даёт −2 % ошибки,
+  оценка трассы по другим пилотам той же гонки — **−20 %**;
+- в Бельгии оптимальный круг пит-стопа по модели совпал с решениями команд (±1 круг).
+
+```bash
+pip install -r requirements-analysis.txt
+python -m analysis.dataset 2026      # → data/laps_2026.parquet (~3 мин, дальше из кеша)
+jupyter notebook notebooks/tyre_degradation.ipynb
+```
+
+Код: `analysis/dataset.py` (сборка датасета), `clean.py` (очистка кругов),
+`model.py` (модели и валидация), `strategy.py` (окно пит-стопа, андеркат).
 
 ## Установка
 

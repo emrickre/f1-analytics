@@ -1,0 +1,6 @@
+# Анализ деградации шин (analysis/, notebooks/)
+pandas>=2.0
+pyarrow
+statsmodels>=0.14
+matplotlib
+jupyter
