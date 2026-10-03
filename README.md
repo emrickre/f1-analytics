@@ -1,5 +1,7 @@
 # F1 Analytics
 
+[![tests](https://github.com/emrickre/f1-analytics/actions/workflows/tests.yml/badge.svg)](https://github.com/emrickre/f1-analytics/actions/workflows/tests.yml)
+
 Анализ данных Формулы-1 через [FastF1](https://docs.fastf1.dev/).
 
 ## Установка
