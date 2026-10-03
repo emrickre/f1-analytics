@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>F1 Live Timing</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Titillium+Web:wght@400;600;700;900&display=swap">
+  <link rel="stylesheet" href="style.css">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 16 16%22%3E%3Crect width=%2216%22 height=%2216%22 rx=%223%22 fill=%22%23e10600%22/%3E%3C/svg%3E">
+</head>
+<body>
+  <header class="top">
+    <div class="brand">
+      <span id="conn" class="conn" title="Server connection"></span>
+      <div>
+        <div id="meeting" class="event">—</div>
+        <div class="sub"><span id="session"></span><span id="sstatus" class="chip"></span></div>
+      </div>
+    </div>
+
+    <div class="center">
+      <div id="flag" class="flag green"><span class="flag-dot"></span><span id="flagtext">—</span></div>
+      <span id="ot" class="ot" hidden title="Overtake mode as announced by Race Control"></span>
+    </div>
+
+    <div class="stats">
+      <div class="stat lap"><small>Lap</small><b id="lap">–</b></div>
+      <div class="stat"><small>Remaining</small><b id="clock">–</b></div>
+      <div class="stat"><small>Air</small><b id="air">–</b></div>
+      <div class="stat"><small>Track</small><b id="trackt">–</b></div>
+      <div id="rain" class="stat rain" hidden><small>Rain</small><b>●</b></div>
+    </div>
+  </header>
+
+  <div id="banner" class="banner" hidden></div>
+
+  <div class="player">
+    <div id="pb-controls" class="pb-controls">
+      <button id="pb-back" class="btn" title="Back 30 s (←, Shift+← — 1 min)">−30</button>
+      <button id="pb-play" class="btn play" title="Play / pause (Space)">▶</button>
+      <button id="pb-fwd" class="btn" title="Forward 30 s (→, Shift+→ — 1 min)">+30</button>
+      <select id="pb-speed" class="btn" title="Playback speed"></select>
+      <span id="pb-time" class="pb-time cur">0:00</span>
+      <input id="pb-range" type="range" min="0" max="1" step="1" value="0" aria-label="Session time">
+      <span id="pb-dur" class="pb-time">0:00</span>
+    </div>
+    <div class="pb-session">
+      <select id="ses-year" class="btn" title="Season"></select>
+      <select id="ses-list" class="btn" title="Session"></select>
+      <button id="ses-load" class="btn accent">Open</button>
+      <span id="pb-status" class="pb-status"></span>
+    </div>
+  </div>
+
+  <nav class="tabs" role="tablist">
+    <button class="tab on" data-tab="timing" role="tab">Timing</button>
+    <button class="tab" data-tab="tele" role="tab">Telemetry</button>
+  </nav>
+
+  <main id="view-timing">
+    <section class="card timing">
+      <div class="card-h">
+        <h2>Timing</h2>
+        <span class="legend"><i class="ob"></i>session best <i class="pb"></i>personal best</span>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th class="c">P</th><th></th><th class="l">Driver</th>
+              <th>Gap</th><th>Interval</th><th>Last lap</th><th>Best lap</th>
+              <th class="c">S1</th><th class="c">S2</th><th class="c">S3</th>
+              <th class="c">Tyre</th><th class="c">Pits</th>
+            </tr>
+          </thead>
+          <tbody id="rows"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <aside>
+      <section class="card mapcard">
+        <div class="card-h"><h2 id="circuit">Track</h2><span id="mapnote" class="note"></span></div>
+        <div id="slot-timing" class="map-slot"><div id="mapbox" class="map"><canvas id="map"></canvas></div></div>
+      </section>
+      <section class="card rcm">
+        <div class="card-h"><h2>Race Control</h2></div>
+        <ul id="rcm"></ul>
+      </section>
+    </aside>
+  </main>
+
+  <main id="view-tele" class="tele" hidden>
+    <aside class="card tower">
+      <div class="card-h"><h2>Position</h2></div>
+      <ol id="tower"></ol>
+    </aside>
+
+    <section id="drv" class="card drv-panel" hidden>
+      <div class="drv-h">
+        <span id="d-pos" class="drv-pos">P–</span>
+        <div class="drv-id"><b id="d-tla">—</b><span id="d-name"></span><small id="d-team"></small></div>
+        <button id="d-close" class="icon-btn" title="Close">✕</button>
+      </div>
+      <div class="drv-chips">
+        <span class="kv"><small>Best lap</small><b id="d-best">–</b></span>
+        <span class="kv"><small>Tyre</small><b id="d-tyre">–</b></span>
+        <span class="kv"><small>Gap</small><b id="d-gap">–</b></span>
+      </div>
+      <svg id="gauge" class="gauge" viewBox="0 0 240 230" aria-label="Telemetry"></svg>
+      <div id="tel-note" class="tel-note"></div>
+      <dl class="drv-secs">
+        <dt>Sector 1</dt><dd id="d-s1"></dd>
+        <dt>Sector 2</dt><dd id="d-s2"></dd>
+        <dt>Sector 3</dt><dd id="d-s3"></dd>
+        <dt>Last lap</dt><dd id="d-last"></dd>
+        <dt>Interval</dt><dd id="d-int"></dd>
+      </dl>
+    </section>
+
+    <section class="card bigmap">
+      <div id="slot-tele" class="map-slot"></div>
+      <div class="map-ctl">
+        <button id="m-follow" class="icon-btn" title="Follow selected driver">➤</button>
+        <button id="m-in" class="icon-btn" title="Zoom in (mouse wheel)">+</button>
+        <button id="m-out" class="icon-btn" title="Zoom out">−</button>
+        <button id="m-reset" class="icon-btn" title="Show whole track">⤢</button>
+      </div>
+      <div class="map-chips">
+        <span id="c-sess" class="pill"></span>
+        <span id="c-air" class="pill"></span>
+      </div>
+      <div id="m-hint" class="map-hint">Pick a driver on the left to see their telemetry</div>
+    </section>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>

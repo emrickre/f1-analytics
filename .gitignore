@@ -1,0 +1,13 @@
+# окружение и байткод
+venv/
+__pycache__/
+*.pyc
+
+# кеши данных (FastF1, OpenF1/архив) и сырые записи фида — большие и восстанавливаются
+cache/
+live_cache/
+recordings/
+
+# локальное
+.DS_Store
+.claude/settings.local.json

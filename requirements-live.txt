@@ -1,0 +1,4 @@
+# Только то, что нужно серверу live-таймингов (без FastF1/pandas/matplotlib).
+websockets>=13
+certifi
+# Для режима `live` (официальный фид F1) дополнительно: signalrcore requests fastf1

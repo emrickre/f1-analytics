@@ -1,0 +1,23 @@
+[Unit]
+Description=F1 live timing (python -m live openf1)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=f1live
+WorkingDirectory=/opt/f1-live
+# F1_LIVE_TOKEN и F1_LIVE_PORT — задаёт deploy.sh
+EnvironmentFile=/etc/f1-live.env
+ExecStart=/opt/f1-live/venv/bin/python -m live --host 0.0.0.0 --port ${F1_LIVE_PORT} openf1
+Restart=always
+RestartSec=5
+# Гонка в памяти ~70 МБ, пик загрузки ~250 МБ — с запасом.
+MemoryMax=450M
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/f1-live
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
