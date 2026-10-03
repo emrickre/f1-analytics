@@ -1,6 +1,7 @@
 """python -m unittest discover tests"""
 
 import asyncio
+import json
 import unittest
 
 from live.decode import decode_z, encode_z
@@ -10,6 +11,8 @@ from live.server import LiveServer
 from live.sim import SimSource
 from live.sources import parse_json_stream
 from live.state import SessionState, merge
+from live import strategy as LS
+from live.history import lap_seconds, parse_gap
 
 
 class MergeTest(unittest.TestCase):
@@ -97,6 +100,112 @@ class CarDataTest(unittest.TestCase):
         self.assertEqual([f[1] for f in w], [101, 102])
         self.assertEqual(w[0][6], -1)                  # DRS нет в данных
         self.assertEqual(cd.window(t0 + 9000, t0 + 9999), [])
+
+
+def feed_lap(st, num, lap, t, pos, gap, comp='MEDIUM', age=None, pit_out=None):
+    """Патчи, которые приходят при завершении круга (как в OpenF1-ленте)."""
+    st.apply('TimingAppData', {'Lines': {num: {'Stints': {'0': {
+        'Compound': comp, 'TotalLaps': age if age is not None else lap}}}}})
+    line = {'NumberOfLaps': lap, 'Position': str(pos), 'GapToLeader': gap,
+            'LastLapTime': {'Value': f'{int(t // 60)}:{t % 60:06.3f}'}}
+    st.apply('TimingData', {'Lines': {num: line}})
+    if pit_out is not None:                     # начало следующего круга
+        st.apply('TimingData', {'Lines': {num: {'PitOut': pit_out}}})
+
+
+class HistoryTest(unittest.TestCase):
+    def test_parsers(self):
+        self.assertAlmostEqual(lap_seconds('1:35.130'), 95.13)
+        self.assertIsNone(lap_seconds(''))
+        self.assertEqual(parse_gap('+12.345', 3), (12.345, 0))
+        self.assertEqual(parse_gap('1 L', 15), (None, 1))
+        self.assertEqual(parse_gap('LAP 5', 1), (0.0, 0))
+
+    def test_laps_pits_and_neutralisation(self):
+        st = SessionState()
+        st.apply('TrackStatus', {'Status': '1'})
+        feed_lap(st, '1', 1, 95.0, 1, '')
+        feed_lap(st, '1', 2, 92.0, 1, '', pit_out=False)
+        feed_lap(st, '1', 3, 112.0, 2, '+3.0', pit_out=True)      # 4-й круг — выезд
+        feed_lap(st, '1', 4, 110.0, 4, '+15.1', comp='HARD', age=1, pit_out=False)
+        st.apply('TrackStatus', {'Status': '4'})
+        feed_lap(st, '1', 5, 130.0, 4, '+14.0', comp='HARD', age=2)
+        st.apply('TrackStatus', {'Status': '1'})
+        feed_lap(st, '1', 5, 130.0, 4, '+14.0')                   # повтор — не записывается
+        rows = {r['lap']: r for r in st.history.laps['1']}
+        self.assertEqual(sorted(rows), [1, 2, 3, 4, 5])
+        self.assertAlmostEqual(rows[2]['t'], 92.0)
+        self.assertEqual((rows[3]['in'], rows[4]['out']), (True, True))
+        self.assertFalse(rows[2]['in'] or rows[2]['out'])
+        self.assertEqual((rows[4]['comp'], rows[4]['age'], rows[4]['gap']), ('HARD', 1, 15.1))
+        self.assertTrue(rows[5]['dirty'])
+        self.assertFalse(rows[4]['dirty'])
+
+
+class LiveStrategyTest(unittest.TestCase):
+    def synthetic(self, deg=0.08, drivers=6, laps=30):
+        st = SessionState()
+        st.apply('TrackStatus', {'Status': '1'})
+        st.apply('LapCount', {'CurrentLap': laps, 'TotalLaps': 50})
+        import random
+        rnd = random.Random(1)
+        for d in range(drivers):
+            for lap in range(1, laps + 1):
+                t = 90 + d * 0.3 + deg * lap - LS.FUEL * lap + rnd.gauss(0, 0.05)
+                feed_lap(st, str(d), lap, t, d + 1, f'+{d * 2.0}', comp='MEDIUM', age=lap)
+        # Второй состав — у пары пилотов, чтобы было из чего выбирать
+        for d in range(2):
+            for lap in range(laps + 1, laps + 21):
+                t = 90 + 0.04 * (lap - laps) - LS.FUEL * lap + rnd.gauss(0, 0.05)
+                st.apply('TimingAppData', {'Lines': {str(d): {'Stints': {'1': {
+                    'Compound': 'HARD', 'TotalLaps': lap - laps}}}}})
+                st.apply('TimingData', {'Lines': {str(d): {
+                    'NumberOfLaps': lap, 'Position': str(d + 1), 'GapToLeader': '',
+                    'LastLapTime': {'Value': f'1:{t - 60:06.3f}'}}}})
+        return st
+
+    def test_degradation_recovered(self):
+        st = self.synthetic()
+        deg = LS.degradation(LS.clean_laps(st.history))
+        self.assertAlmostEqual(deg['MEDIUM']['deg'], 0.08, delta=0.005)
+        self.assertAlmostEqual(deg['HARD']['deg'], 0.04, delta=0.01)
+
+    def test_pit_window_analytic(self):
+        deg = {'MEDIUM': {'deg': 0.10, 'n': 100}, 'HARD': {'deg': 0.05, 'n': 100}}
+        # Новые MEDIUM, 50 кругов до финиша, потеря 20 с → оптимум через 17 кругов
+        w = LS.pit_window(deg, 'MEDIUM', 0, 50, 20.0)
+        self.assertEqual(w[0]['compound'], 'HARD')
+        self.assertEqual(w[0]['in_laps'], 17)
+        self.assertGreater(w[0]['gain'], 0)
+        # Мало кругов до финиша — останавливаться невыгодно
+        self.assertLess(LS.pit_window(deg, 'MEDIUM', 5, 8, 20.0)[0]['gain'], 0)
+
+    def test_view(self):
+        v = LS.strategy_view(self.synthetic())
+        self.assertEqual(v['totalLaps'], 50)
+        self.assertEqual(len(v['laps']), 6)
+        self.assertTrue(v['deg']['MEDIUM']['significant'])
+        self.assertIn('0', v['windows'])
+        json.dumps(v)                                   # сериализуется
+
+
+class SimStrategyTest(unittest.TestCase):
+    """Сим-гонка: деградация 0.06 с/круг, топлива нет → модель должна найти ~0.06."""
+
+    def test_sim(self):
+        async def run():
+            st = SessionState()
+            async for ev in SimSource(speed=400, seed=3).events():
+                if ev['kind'] == 'snapshot':
+                    st.apply_snapshot(ev['data'])
+                else:
+                    st.apply(ev['topic'], ev['data'], ev['ts'])
+                if (st.data.get('LapCount') or {}).get('CurrentLap', 0) >= 12:
+                    return st
+        st = asyncio.run(asyncio.wait_for(run(), 120))
+        deg = LS.degradation(LS.clean_laps(st.history), fuel=0.0)
+        best = max(deg.values(), key=lambda d: d['n'])
+        self.assertAlmostEqual(best['deg'], 0.06, delta=0.02)
 
 
 class TokenTest(unittest.TestCase):

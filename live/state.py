@@ -12,6 +12,8 @@ import math
 from datetime import datetime, timezone
 
 from .decode import normalize
+from .history import LapHistory
+from .util import at, items
 
 # Топики, которые редьюсер игнорирует (пишутся только в сырую запись).
 IGNORED = {'CarData', 'Heartbeat', 'AudioStreams', 'ContentStreams',
@@ -64,24 +66,6 @@ def parse_ts(ts):
         return datetime.fromisoformat(s).replace(tzinfo=timezone.utc)
     except ValueError:
         return None
-
-
-def items(x):
-    """Пары (ключ, значение) и для списка, и для dict-с-индексами."""
-    if isinstance(x, list):
-        return [(str(i), v) for i, v in enumerate(x)]
-    if isinstance(x, dict):
-        return list(x.items())
-    return []
-
-
-def at(x, i):
-    """Элемент по индексу из списка или dict-с-индексами."""
-    if isinstance(x, list):
-        return x[i] if i < len(x) else None
-    if isinstance(x, dict):
-        return x.get(str(i))
-    return None
 
 
 def overtake_mode(rcm):
@@ -202,6 +186,7 @@ class SessionState:
         self.pos_frames = []     # [(epoch_ms, {num: [x, y, on]})]
         self.clock = None        # время фида последнего сообщения
         self.outline = TrackOutline()
+        self.history = LapHistory()   # строка на каждый завершённый круг
         self.version = 0
         self.messages = 0
 
@@ -219,6 +204,7 @@ class SessionState:
             self._apply_position(data)
         else:
             self.data[topic] = merge(self.data.get(topic), data)
+            self.history.observe(topic, data, self.data)
         self.version += 1
 
     def apply_snapshot(self, snapshot):

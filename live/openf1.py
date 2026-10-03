@@ -239,7 +239,12 @@ class OpenF1Source:
                 add(t, 'SessionStatus',
                     {'Status': f'Q{phase} {word}' if phase else word})
 
-        # Пит-стопы (в гонке есть время в пит-лейне)
+        # Пит-стопы (в гонке есть время в пит-лейне). Время `date` у OpenF1
+        # приходится уже на круг выезда, а lap_number — круг заезда, поэтому
+        # «в боксах» ставим с конца круга заезда (= начала следующего круга).
+        # PitOut ставит событие начала круга выезда (is_pit_out_lap) в _laps.
+        lap_start_at = {(str(x['driver_number']), x['lap_number']): ts_of(x['date_start'])
+                        for x in d['laps'] if x.get('date_start')}
         stops = {}
         for p in sorted(d['pit'], key=lambda p: p['date']):
             lane = p.get('lane_duration') or p.get('pit_duration')
@@ -247,11 +252,12 @@ class OpenF1Source:
                 continue
             n = str(p['driver_number'])
             stops[n] = stops.get(n, 0) + 1
-            t = ts_of(p['date'])
-            add(t, 'TimingData', {'Lines': {n: {'InPit': True,
-                                                'NumberOfPitStops': stops[n]}}})
-            add(t + timedelta(seconds=lane), 'TimingData',
-                {'Lines': {n: {'InPit': False, 'PitOut': True}}})
+            t_out = ts_of(p['date']) + timedelta(seconds=lane)
+            t_in = lap_start_at.get((n, p.get('lap_number', 0) + 1)) or ts_of(p['date'])
+            add(t_in, 'TimingData', {'Lines': {n: {'InPit': True,
+                                                   'NumberOfPitStops': stops[n]}}})
+            add(max(t_out, t_in + timedelta(seconds=1)), 'TimingData',
+                {'Lines': {n: {'InPit': False}}})
 
         # Отрывы в гонке
         for iv in d['intervals']:
@@ -292,11 +298,18 @@ class OpenF1Source:
 
         # Сырые отметки: (t, n, kind, payload) — потом проходим по порядку.
         raw = []
-        for x in d['laps']:
+        prev_end = {}
+        for x in sorted(d['laps'], key=lambda x: (x['driver_number'], x['lap_number'])):
             t = ts_of(x.get('date_start'))
             if t is None:
                 continue
             n, lap = str(x['driver_number']), x['lap_number']
+            # Начало круга не раньше конца предыдущего: иначе флаги нового круга
+            # (PitOut и т.п.) применились бы до записи завершённого.
+            if n in prev_end and t <= prev_end[n]:
+                t = prev_end[n] + timedelta(milliseconds=1)
+            if x.get('lap_duration'):
+                prev_end[n] = t + timedelta(seconds=x['lap_duration'])
             raw.append((t, n, 'start', x))
             acc = 0.0
             for i in range(3):
@@ -308,8 +321,9 @@ class OpenF1Source:
                     acc += v
                     raw.append((t + timedelta(seconds=acc), n, 'sector', (i, v)))
             dur = x.get('lap_duration')
-            if dur and x.get('is_pit_out_lap'):
-                # Круг выезда включает время в гараже — как и F1, не показываем.
+            if dur and x.get('is_pit_out_lap') and not is_race:
+                # В практике/квалификации круг выезда включает время в гараже —
+                # как и F1, не показываем. В гонке он нужен для потери на пит-стопе.
                 raw.append((t + timedelta(seconds=dur), n, 'lap', (lap, None)))
             elif dur:
                 raw.append((t + timedelta(seconds=dur), n, 'lap', (lap, dur)))
@@ -317,6 +331,7 @@ class OpenF1Source:
                 raw.append((t + timedelta(seconds=acc), n, 'lap', (lap, None)))
         raw.sort(key=lambda r: r[0])
 
+        total_laps = max((x['lap_number'] for x in d['laps']), default=None)
         best_sec, best_lap = {}, {}
         ob_sec, ob_lap = [None] * 3, None
         cur_lap = 0
@@ -328,7 +343,8 @@ class OpenF1Source:
                 line['PitOut'] = bool(x.get('is_pit_out_lap'))
                 if is_race and x['lap_number'] > cur_lap:
                     cur_lap = x['lap_number']
-                    ev.append((t, 'LapCount', {'CurrentLap': cur_lap}))
+                    ev.append((t, 'LapCount', {'CurrentLap': cur_lap,
+                                               'TotalLaps': total_laps}))
             elif kind == 'sector':
                 i, v = x
                 pb = v < best_sec.get((n, i), 1e9)
