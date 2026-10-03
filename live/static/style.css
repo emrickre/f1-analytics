@@ -324,3 +324,41 @@ td.sec { padding: 0 3px; }
 .g-mode { font: 900 11px var(--font); fill: var(--dim); letter-spacing: .12em; }
 .g-mode.on { fill: var(--green); }
 .g-lbl { font: 700 9px var(--font); fill: var(--muted); letter-spacing: .12em; }
+
+/* --- стратегия ------------------------------------------------------------ */
+.strat {
+  display: grid; grid-template-columns: minmax(0, 1fr) 330px; grid-template-rows: 1.15fr 1fr;
+  gap: 14px; padding: 14px 20px 20px; height: calc(100vh - 190px); min-height: 600px;
+}
+.strat .model { grid-row: 1 / 3; grid-column: 2; overflow-y: auto; }
+.strat .card { display: flex; flex-direction: column; min-height: 0; }
+.chart { position: relative; flex: 1; min-height: 0; }
+.chart canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+@media (max-width: 1000px) {
+  .strat { grid-template-columns: 1fr; grid-template-rows: none; height: auto; }
+  .strat .model { grid-row: auto; grid-column: auto; }
+  .strat .trace, .strat .stints { height: 55vh; }
+}
+.m-deg { padding: 8px 14px 4px; display: grid; gap: 6px; }
+.deg-row {
+  display: grid; grid-template-columns: 26px 1fr auto; align-items: center; gap: 10px;
+  background: var(--panel-2); border-radius: 8px; padding: 7px 10px;
+}
+.deg-row b { font-size: 16px; font-variant-numeric: tabular-nums; }
+.deg-row small { display: block; color: var(--muted); font-size: 11px; }
+.deg-row .badge { font-size: 10px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase;
+  padding: 2px 6px; border-radius: 4px; background: #262a33; color: var(--muted); }
+.deg-row .badge.ok { background: #14532d; color: #b7f5cc; }
+.m-loss { padding: 6px 14px; color: var(--muted); font-size: 13px; }
+.m-loss b { color: var(--text); }
+.m-driver { margin: 6px 14px 0; padding: 12px; border-radius: 10px; background: #181b23;
+  border: 1px solid var(--line-2); border-top: 3px solid var(--c, var(--f1)); }
+.m-driver h3 { margin: 0 0 6px; font-size: 18px; font-weight: 900; }
+.m-driver h3 small { font-size: 12px; font-weight: 600; color: var(--muted); margin-left: 6px; }
+.m-driver .now { color: var(--muted); font-size: 13px; margin-bottom: 8px; }
+.box-opt { display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 10px;
+  padding: 7px 0; border-top: 1px solid #1b1e26; font-size: 13px; }
+.box-opt b { font-size: 15px; }
+.box-opt .gain { font-weight: 700; color: var(--green); font-variant-numeric: tabular-nums; }
+.box-opt .gain.neg { color: var(--muted); }
+.fine { color: var(--dim); font-size: 11px; line-height: 1.45; padding: 10px 14px 14px; margin: 0; }

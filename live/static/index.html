@@ -57,6 +57,7 @@
   <nav class="tabs" role="tablist">
     <button class="tab on" data-tab="timing" role="tab">Timing</button>
     <button class="tab" data-tab="tele" role="tab">Telemetry</button>
+    <button class="tab" data-tab="strat" role="tab">Strategy</button>
   </nav>
 
   <main id="view-timing">
@@ -134,6 +135,26 @@
       </div>
       <div id="m-hint" class="map-hint">Pick a driver on the left to see their telemetry</div>
     </section>
+  </main>
+
+  <main id="view-strat" class="strat" hidden>
+    <section class="card trace">
+      <div class="card-h"><h2>Race trace</h2><span class="note">gap to leader, s · yellow — SC / VSC / flags</span></div>
+      <div class="chart"><canvas id="c-trace"></canvas></div>
+    </section>
+    <section class="card stints">
+      <div class="card-h"><h2>Tyre stints</h2><span class="note">completed laps</span></div>
+      <div class="chart"><canvas id="c-stints"></canvas></div>
+    </section>
+    <aside class="card model">
+      <div class="card-h"><h2>Tyre model</h2><span id="m-note" class="note"></span></div>
+      <div id="m-deg" class="m-deg"></div>
+      <div id="m-loss" class="m-loss"></div>
+      <div id="m-driver" class="m-driver"></div>
+      <p class="fine">Learns only from laps completed so far by all drivers in this race
+        (fuel-corrected, 0.044 s per lap of fuel). Clean laps only: no pit, SC/VSC or
+        yellow-flag laps. Pit window = one-stop minimum, ±1 s.</p>
+    </aside>
   </main>
 
   <script src="app.js"></script>

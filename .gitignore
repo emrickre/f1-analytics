@@ -18,3 +18,4 @@ data/
 # настройки ИИ-ассистента — локальные
 CLAUDE.md
 .claude/
+.ipynb_checkpoints/

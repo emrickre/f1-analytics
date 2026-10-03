@@ -9,6 +9,7 @@
     {'type': 'pos', 'now': ms, 'frames': [[ms, {num: [x, y, on]}]]}
                                                      — сэмплы координат, 10 Гц
     {'type': 'sessions', 'year': int, 'items': [...]} — каталог OpenF1
+    {'type': 'strategy', ...strategy_view()}          — история кругов и модель шин
 
 Браузер → сервер:
     {'cmd': 'play' | 'pause' | 'toggle'}
@@ -38,6 +39,7 @@ from . import openf1
 from .player import Player
 from .sources import http_get, recorded
 from .state import SessionState
+from .strategy import strategy_view
 
 log = logging.getLogger('live.server')
 STATIC = Path(__file__).parent / 'static'
@@ -268,8 +270,8 @@ class LiveServer:
     # --- рассылка ----------------------------------------------------------
 
     async def push(self):
-        last_state = last_outline = last_pb = None
-        last_outline_t = 0.0
+        last_state = last_outline = last_pb = last_strategy = None
+        last_outline_t = last_strategy_t = 0.0
         loop = asyncio.get_running_loop()
         while True:
             await asyncio.sleep(TICK)
@@ -286,6 +288,11 @@ class LiveServer:
             if key != last_state:
                 broadcast(self.clients, self._state_msg())
                 last_state = key
+            # Стратегия меняется раз в круг — не чаще раза в секунду.
+            key = (id(st), st.history.version)
+            if key != last_strategy and now - last_strategy_t >= 1.0:
+                broadcast(self.clients, dumps(strategy_view(st)))
+                last_strategy, last_strategy_t = key, now
             pb = self.playback()
             if pb != last_pb:
                 broadcast(self.clients, dumps({'type': 'playback', **pb}))
@@ -330,6 +337,7 @@ class LiveServer:
             await ws.send(self._outline_msg())
             await ws.send(self._state_msg())
             await ws.send(dumps({'type': 'playback', **self.playback()}))
+            await ws.send(dumps(strategy_view(self.state)))
             async for raw in ws:
                 try:
                     await self.command(ws, json.loads(raw))

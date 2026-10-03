@@ -34,6 +34,7 @@ function connect(delay = 500) {
     else if (m.type === 'outline') { outline = m; fitMap(); }
     else if (m.type === 'playback') onPlayback(m);
     else if (m.type === 'sessions') onSessions(m);
+    else if (m.type === 'strategy') { strat = m; drawStrategy(); }
   };
 }
 
@@ -171,6 +172,7 @@ function select(num) {
   send({ cmd: 'focus', driver: selected });
   if (!selected && view.follow) { view.follow = false; resetView(); }
   if (state) render();
+  drawStrategy();
   syncFollowBtn();
 }
 
@@ -224,9 +226,11 @@ function setTab(tab) {
   document.querySelectorAll('.tab').forEach((b) => b.classList.toggle('on', b.dataset.tab === tab));
   $('view-timing').hidden = tab !== 'timing';
   $('view-tele').hidden = tab !== 'tele';
+  $('view-strat').hidden = tab !== 'strat';
   $(tab === 'tele' ? 'slot-tele' : 'slot-timing').appendChild($('mapbox'));
   if (tab !== 'tele') { view.follow = false; resetView(); }
   syncFollowBtn();
+  if (tab === 'strat') drawStrategy();
   try { localStorage.setItem('f1tab', tab); } catch (e) { /* приватный режим */ }
 }
 document.querySelectorAll('.tab').forEach((b) => { b.onclick = () => setTab(b.dataset.tab); });
@@ -339,6 +343,190 @@ $('ses-load').onclick = () => {
   const key = Number($('ses-list').value);
   if (key) send({ cmd: 'load', session_key: key });
 };
+
+// ---------- вкладка Strategy: race trace, стинты, модель шин ----------
+
+let strat = null;
+const TYRE = { SOFT: '#ff3b3b', MEDIUM: '#ffd23f', HARD: '#eef0f4', INTERMEDIATE: '#3ccf4e', WET: '#2e8bff' };
+// Поля строки круга с сервера (live/strategy.py:strategy_view)
+const L = { lap: 0, t: 1, pos: 2, gap: 3, down: 4, comp: 5, age: 6, stint: 7, flags: 8 };
+
+function setupCanvas(cv) {
+  const dpr = window.devicePixelRatio || 1;
+  const w = cv.clientWidth, h = cv.clientHeight;
+  if (cv.width !== Math.round(w * dpr) || cv.height !== Math.round(h * dpr)) {
+    cv.width = Math.round(w * dpr); cv.height = Math.round(h * dpr);
+  }
+  const c = cv.getContext('2d');
+  c.setTransform(dpr, 0, 0, dpr, 0, 0);
+  c.clearRect(0, 0, w, h);
+  c.font = '600 11px Titillium Web, system-ui';
+  return [c, w, h];
+}
+
+function drawStrategy() {
+  if (!strat || $('view-strat').hidden) return;
+  drawTrace();
+  drawStints();
+  renderModel();
+}
+
+function maxLap() {
+  let m = strat.totalLaps || 0;
+  for (const laps of Object.values(strat.laps)) if (laps.length) m = Math.max(m, laps.at(-1)[L.lap]);
+  return Math.max(m, 5);
+}
+
+function drawTrace() {
+  const [c, w, h] = setupCanvas($('c-trace'));
+  const isRace = /race|sprint/i.test(strat.sessionType);
+  if (!isRace) {
+    c.fillStyle = '#8b92a1'; c.textAlign = 'center';
+    c.fillText('Race trace is available for races and sprints', w / 2, h / 2);
+    c.textAlign = 'start';
+    return;
+  }
+  const pad = { l: 44, r: 46, t: 12, b: 26 };
+  const N = maxLap();
+  // Масштаб по отрыву: 95-й перцентиль, чтобы один отставший не сжал график.
+  const gaps = [];
+  for (const laps of Object.values(strat.laps)) for (const r of laps) if (r[L.gap] != null) gaps.push(r[L.gap]);
+  gaps.sort((a, b) => a - b);
+  const gMax = Math.max(10, Math.ceil((gaps[Math.floor(gaps.length * 0.95)] || 10) / 10) * 10);
+  const X = (lap) => pad.l + (lap - 1) / Math.max(1, N - 1) * (w - pad.l - pad.r);
+  const Y = (g) => pad.t + Math.min(g, gMax) / gMax * (h - pad.t - pad.b);
+
+  // Нейтрализации — по кругам лидера
+  const leaderLaps = new Map();
+  for (const laps of Object.values(strat.laps)) for (const r of laps) {
+    if (r[L.pos] === 1) leaderLaps.set(r[L.lap], r[L.flags] & 4);
+  }
+  c.fillStyle = '#ffd23f1f';
+  const cw = (w - pad.l - pad.r) / Math.max(1, N - 1);
+  for (const [lap, dirty] of leaderLaps) if (dirty) c.fillRect(X(lap) - cw / 2, pad.t, cw, h - pad.t - pad.b);
+
+  // Оси
+  c.strokeStyle = '#242833'; c.fillStyle = '#5d6372'; c.lineWidth = 1;
+  for (let g = 0; g <= gMax; g += gMax > 60 ? 20 : 10) {
+    c.beginPath(); c.moveTo(pad.l, Y(g)); c.lineTo(w - pad.r, Y(g)); c.stroke();
+    c.fillText(`+${g}`, 8, Y(g) + 4);
+  }
+  const step = N > 40 ? 10 : 5;
+  for (let lap = step; lap <= N; lap += step) c.fillText(lap, X(lap) - 6, h - 8);
+
+  const nums = Object.keys(strat.laps).sort((a, b) => (a === selected) - (b === selected));
+  for (const num of nums) {
+    const laps = strat.laps[num];
+    const d = strat.drivers[num] || { tla: num, color: '#888' };
+    const sel = num === selected;
+    c.globalAlpha = selected && !sel ? 0.35 : 0.9;
+    c.strokeStyle = d.color; c.lineWidth = sel ? 3 : 1.4;
+    c.beginPath();
+    let pen = false, last = null;
+    for (const r of laps) {
+      if (r[L.gap] == null) { pen = false; continue; }      // круг отставания — разрыв
+      const x = X(r[L.lap]), y = Y(r[L.gap]);
+      pen ? c.lineTo(x, y) : c.moveTo(x, y);
+      pen = true; last = [x, y];
+    }
+    c.stroke();
+    if (last) {
+      c.fillStyle = sel ? '#fff' : d.color;
+      c.font = `${sel ? 900 : 700} ${sel ? 12 : 10}px Titillium Web, system-ui`;
+      c.fillText(d.tla, last[0] + 4, last[1] + 4);
+    }
+  }
+  c.globalAlpha = 1;
+}
+
+function drawStints() {
+  const [c, w, h] = setupCanvas($('c-stints'));
+  const order = state ? state.rows.map((r) => r.num) : Object.keys(strat.laps);
+  const nums = order.filter((n) => strat.laps[n] && strat.laps[n].length);
+  if (!nums.length) return;
+  const pad = { l: 46, r: 14, t: 6, b: 22 };
+  const N = maxLap();
+  const rowH = (h - pad.t - pad.b) / nums.length;
+  const X = (lap) => pad.l + (lap - 0.5) / N * (w - pad.l - pad.r);
+  const lapW = (w - pad.l - pad.r) / N;
+
+  nums.forEach((num, i) => {
+    const y = pad.t + i * rowH;
+    const d = strat.drivers[num] || { tla: num, color: '#888' };
+    if (num === selected) { c.fillStyle = '#ffffff14'; c.fillRect(0, y, w, rowH); }
+    c.fillStyle = num === selected ? '#fff' : '#8b92a1';
+    c.font = `${num === selected ? 900 : 700} ${Math.min(11, rowH - 2)}px Titillium Web, system-ui`;
+    c.fillText(d.tla, 8, y + rowH / 2 + 4);
+    // Стинты: подряд идущие круги с одним номером стинта
+    let start = null;
+    const laps = strat.laps[num];
+    laps.forEach((r, j) => {
+      const next = laps[j + 1];
+      if (start == null) start = r;
+      if (!next || next[L.stint] !== r[L.stint]) {
+        const x0 = X(start[L.lap]) - lapW / 2, x1 = X(r[L.lap]) + lapW / 2;
+        c.fillStyle = TYRE[r[L.comp]] || '#5d6372';
+        c.globalAlpha = 0.85;
+        c.fillRect(x0 + 1, y + rowH * 0.18, x1 - x0 - 2, rowH * 0.64);
+        c.globalAlpha = 1;
+        if (x1 - x0 > 22 && rowH > 9) {
+          c.fillStyle = '#0b0c10'; c.font = `700 ${Math.min(10, rowH - 4)}px Titillium Web, system-ui`;
+          c.fillText((r[L.comp] || '?')[0], x0 + 4, y + rowH / 2 + 3.5);
+        }
+        start = null;
+      }
+    });
+  });
+  // Текущий круг
+  if (strat.currentLap) {
+    c.strokeStyle = '#e10600'; c.lineWidth = 1.5;
+    const x = X(strat.currentLap);
+    c.beginPath(); c.moveTo(x, pad.t); c.lineTo(x, h - pad.b); c.stroke();
+  }
+  c.fillStyle = '#5d6372'; c.font = '600 11px Titillium Web, system-ui';
+  const step = N > 40 ? 10 : 5;
+  for (let lap = step; lap <= N; lap += step) c.fillText(lap, X(lap) - 6, h - 6);
+}
+
+function renderModel() {
+  const order = ['SOFT', 'MEDIUM', 'HARD'];
+  $('m-note').textContent = strat.cleanLaps ? `${strat.cleanLaps} clean laps` : '';
+  const rows = order.filter((cpd) => strat.deg[cpd]).map((cpd) => {
+    const d = strat.deg[cpd];
+    const ci = d.se != null ? ` ± ${(1.96 * d.se).toFixed(3)}` : '';
+    const badge = !d.enough ? '<span class="badge">few laps</span>'
+      : d.significant ? '<span class="badge ok">wear</span>' : '<span class="badge">no clear wear</span>';
+    return `<div class="deg-row"><span class="tyre t-${cpd}">${cpd[0]}</span>
+      <div><b>${d.deg >= 0 ? '+' : ''}${d.deg.toFixed(3)} s/lap</b><small>${cpd}${ci} · ${d.n} laps</small></div>${badge}</div>`;
+  });
+  $('m-deg').innerHTML = rows.join('') || '<p class="fine">Waiting for clean laps…</p>';
+  $('m-loss').innerHTML = `Pit stop costs <b>${strat.pitLoss.value.toFixed(1)} s</b> ${
+    strat.pitLoss.stops ? `(median of ${strat.pitLoss.stops} green-flag stops)` : '(default until first stops)'}`;
+
+  // Пилот: выбранный, иначе лидер
+  const lead = state && state.rows.length ? state.rows[0].num : null;
+  const num = selected || lead;
+  const w = num && strat.windows[num];
+  const d = num && strat.drivers[num];
+  const box = $('m-driver');
+  if (!w || !d) {
+    box.innerHTML = `<p class="fine">${strat.totalLaps ? 'Pick a driver to see their pit window.'
+      : 'Pit windows need the race distance (available in races).'}</p>`;
+    box.style.removeProperty('--c');
+    return;
+  }
+  box.style.setProperty('--c', d.color);
+  const opts = w.options.length ? w.options.map((o) => {
+    const good = o.gain > 0;
+    const when = o.window[0] === o.window[1] ? `lap ${o.window[0]}` : `laps ${o.window[0]}–${o.window[1]}`;
+    return `<div class="box-opt"><span class="tyre t-${o.compound}">${o.compound[0]}</span>
+      <span>${good ? `<b>Box lap ${o.stop_lap}</b> · window ${when}` : '<b>Stay out</b> — no gain from stopping'}</span>
+      <span class="gain ${good ? '' : 'neg'}">${good ? '+' : ''}${o.gain.toFixed(1)} s</span></div>`;
+  }).join('') : '<p class="fine">Not enough data on other compounds yet.</p>';
+  box.innerHTML = `<h3>${esc(d.tla)}<small>${selected ? '' : 'leader · '}${w.laps_left} laps to go</small></h3>
+    <div class="now"><span class="tyre t-${w.compound}">${w.compound[0]}</span> ${w.compound} · ${w.age} laps old</div>
+    ${opts}`;
+}
 
 // ---------- плавное движение: интерполяция с задержкой ----------
 //
@@ -691,8 +879,8 @@ function sampleTel(t) {
   while (i > 0 && a[i][0] > t) i--;
   const p = a[i], q = a[Math.min(i + 1, a.length - 1)];
   const k = q[0] > p[0] ? Math.min(1, Math.max(0, (t - p[0]) / (q[0] - p[0]))) : 0;
-  const L = (j) => p[j] + (q[j] - p[j]) * k;
-  return { speed: L(1), rpm: L(2), gear: p[3], thr: L(4), brk: p[5], drs: p[6] };
+  const lerp = (j) => p[j] + (q[j] - p[j]) * k;
+  return { speed: lerp(1), rpm: lerp(2), gear: p[3], thr: lerp(4), brk: p[5], drs: p[6] };
 }
 
 const G = { cx: 120, cy: 118 };
@@ -795,6 +983,7 @@ function frame(now) {
 
 let initialTab = 'timing';
 try { initialTab = localStorage.getItem('f1tab') || 'timing'; } catch (e) { /* нет storage */ }
-setTab(initialTab === 'tele' ? 'tele' : 'timing');
+setTab(['tele', 'strat'].includes(initialTab) ? initialTab : 'timing');
+window.addEventListener('resize', () => drawStrategy());
 requestAnimationFrame(frame);
 connect();
