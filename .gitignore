@@ -11,3 +11,6 @@ recordings/
 # локальное
 .DS_Store
 .claude/settings.local.json
+
+# собранные датасеты (python -m analysis.dataset 2026)
+data/
