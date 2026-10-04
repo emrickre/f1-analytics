@@ -10,26 +10,32 @@ or on the track, and when is the optimal moment to pit?
 ## Key findings
 
 - **Degradation is a property of the track, not of the compound.** Fitted race by race,
-  degradation ranges from −0.014 to 0.114 s/lap between tracks. Within the same race the median
-  SOFT − MEDIUM difference is only −0.007 s/lap, and the soft wears faster in just 5 of 12 races.
+  degradation ranges from −0.013 to 0.115 s/lap between tracks. Within the same race the median
+  SOFT − MEDIUM difference is only −0.008 s/lap, and the soft wears faster in just 5 of 13 races.
 - **Simpson's paradox in the naive model.** A season-wide mixed model says SOFT wears slower
-  than MEDIUM (0.018 vs 0.032 s/lap). The reason is that teams run softs mostly on low-wear tracks.
+  than MEDIUM (0.013 vs 0.032 s/lap). The reason is that teams run softs mostly on low-wear tracks.
 - **What a strategist can predict.** After 3 laps of a stint, estimating degradation from the
-  *other drivers in the same race* cuts the lap-time forecast error by **20 %** (MAE 0.77 s vs
-  0.96 s for a flat-pace baseline). A season-average model gains only 2 %. The track model wins
-  in 11 of 15 races.
-- **Belgian GP case.** The model's optimal one-stop lap (16, window 12–20) matches the laps the
+  *other drivers in the same race* cuts the lap-time forecast error by **20 %** (MAE 0.78 s vs
+  0.97 s for a flat-pace baseline). A season-average model gains only 2 %. The track model wins
+  in 12 of 16 races.
+- **Belgian GP case.** The model's optimal one-stop lap (16, window 12–21) matches the laps the
   teams actually chose (14–17).
+- **Beyond a linear model.** A track-specific quadratic wear curve cuts the forecast error further,
+  to **24 %** (MAE 0.73 s). Separating track evolution (the track typically gets 0.01 s/lap faster)
+  removes most of the impossible negative-wear estimates, but it does not make the pit-window
+  choice more reliable, so strategy keeps the simpler model.
 
 ![Degradation by race and compound](docs/degradation_by_track.png)
 
 ![Lap-time forecast error by race](docs/forecast_error.png)
 
+![Tyre wear once track evolution is separated](docs/track_evolution.png)
+
 ## Data
 
 Every race lap of the 2026 season from the [OpenF1](https://openf1.org) API: lap and sector
 times, tyre compound and age, pit stops, Safety Car / VSC / flags, track temperature.
-17,260 laps from 15 races, 13,670 after cleaning. The dataset is included in
+18,405 laps from 16 races, 14,263 after cleaning. The dataset is included in
 [`data/laps_2026.parquet`](data/laps_2026.parquet).
 
 ## Method
@@ -40,8 +46,10 @@ times, tyre compound and age, pit stops, Safety Car / VSC / flags, track tempera
    the reason for each.
 3. **Model**: `analysis/model.py` fits a linear mixed model
    `lap_time ~ compound + compound:tyre_age + fuel + track_temperature` over the season, and
-   per-race models with a fixed season fuel effect (0.044 s per lap of fuel).
-4. **Validate**: lap-time forecasts with leave-one-race-out and leave-one-driver-out splits.
+   per-race models with a fixed season fuel effect (0.045 s per lap of fuel).
+4. **Validate**: lap-time forecasts with leave-one-race-out and leave-one-driver-out splits;
+   per-race variants with a track-evolution term (`lap_number`) and quadratic wear are compared
+   on the same task.
 5. **Strategy**: `analysis/strategy.py` computes measured pit loss, the one-stop race-time
    curve, the optimal window and the undercut gain.
 

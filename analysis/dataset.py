@@ -155,13 +155,19 @@ def build_session_laps(raw, meta=None):
 def build_laps(year, session_name='Race', src=None):
     """Все прошедшие гонки сезона → один DataFrame кругов."""
     src = src or OpenF1Source()
-    sessions = [s for s in catalog(year) if s['name'] == session_name and s['available']]
+    season = [s for s in catalog(year) if s['name'] == session_name]
+    sessions = [s for s in season if s['available']]
+    # Перенесённый этап сохраняет название: в 2026 «Bahrain Grand Prix» прошёл в
+    # Куала-Лумпуре. Одинаковые названия в сезоне подписываем местом проведения.
+    names = [s['meeting'] for s in season]
+    label = lambda s: (f"{s['meeting']} ({s['location']})"            # noqa: E731
+                       if names.count(s['meeting']) > 1 else s['meeting'])
     frames = []
     for round_no, s in enumerate(sessions, 1):
-        log.info('%2d/%d %s %s', round_no, len(sessions), s['meeting'], s['name'])
+        log.info('%2d/%d %s %s', round_no, len(sessions), label(s), s['name'])
         raw = fetch_session(s['key'], src)
         frames.append(build_session_laps(raw, meta={
-            'year': year, 'round': round_no, 'race': s['meeting'],
+            'year': year, 'round': round_no, 'race': label(s),
             'location': s['location'], 'session': s['name']}))
     df = pd.concat([f for f in frames if not f.empty], ignore_index=True)
     return df
