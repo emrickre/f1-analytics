@@ -46,6 +46,9 @@ jobs:
         run: pip install -r requirements-live.txt -r requirements-analysis.txt
       - name: Run analysis tests
         run: python -m unittest -v tests.test_analysis
+      - name: Execute the notebook on the committed dataset
+        working-directory: notebooks
+        run: jupyter nbconvert --to notebook --execute --output /tmp/executed.ipynb tyre_degradation.ipynb
 
   frontend:
     name: Frontend syntax

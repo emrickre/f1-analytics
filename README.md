@@ -1,166 +1,81 @@
-# F1 Analytics
+# F1 Tyre Degradation & Pit-Stop Strategy
 
 [![tests](https://github.com/emrickre/f1-analytics/actions/workflows/tests.yml/badge.svg)](https://github.com/emrickre/f1-analytics/actions/workflows/tests.yml)
 
-Анализ данных Формулы-1 через [FastF1](https://docs.fastf1.dev/).
+How fast do Formula 1 tyres degrade in the 2026 season, does it depend on the compound
+or on the track, and when is the optimal moment to pit?
 
-## Анализ: деградация шин и стратегия пит-стопов
+📓 **[Read the analysis → notebooks/tyre_degradation.ipynb](notebooks/tyre_degradation.ipynb)**
 
-📓 **[notebooks/tyre_degradation.ipynb](notebooks/tyre_degradation.ipynb)** — все гонки
-сезона 2026 из OpenF1, ~13,7 тыс. чистых кругов, смешанная модель (statsmodels).
+## Key findings
 
-Главные выводы:
-- наивная модель по сезону говорит, что SOFT изнашивается медленнее MEDIUM, — это
-  парадокс Симпсона: SOFT используют на трассах с низким износом;
-- внутри одной гонки составы деградируют почти одинаково, **решает трасса**
-  (от ≈0 до 0,15 с/круг);
-- прогноз времени круга внутри стинта: средняя по сезону деградация даёт −2 % ошибки,
-  оценка трассы по другим пилотам той же гонки — **−20 %**;
-- в Бельгии оптимальный круг пит-стопа по модели совпал с решениями команд (±1 круг).
+- **Degradation is a property of the track, not of the compound.** Fitted race by race,
+  degradation ranges from −0.014 to 0.114 s/lap between tracks. Within the same race the median
+  SOFT − MEDIUM difference is only −0.007 s/lap, and the soft wears faster in just 5 of 12 races.
+- **Simpson's paradox in the naive model.** A season-wide mixed model says SOFT wears slower
+  than MEDIUM (0.018 vs 0.032 s/lap). The reason is that teams run softs mostly on low-wear tracks.
+- **What a strategist can predict.** After 3 laps of a stint, estimating degradation from the
+  *other drivers in the same race* cuts the lap-time forecast error by **20 %** (MAE 0.77 s vs
+  0.96 s for a flat-pace baseline). A season-average model gains only 2 %. The track model wins
+  in 11 of 15 races.
+- **Belgian GP case.** The model's optimal one-stop lap (16, window 12–20) matches the laps the
+  teams actually chose (14–17).
+
+![Degradation by race and compound](docs/degradation_by_track.png)
+
+![Lap-time forecast error by race](docs/forecast_error.png)
+
+## Data
+
+Every race lap of the 2026 season from the [OpenF1](https://openf1.org) API: lap and sector
+times, tyre compound and age, pit stops, Safety Car / VSC / flags, track temperature.
+17,260 laps from 15 races, 13,670 after cleaning. The dataset is included in
+[`data/laps_2026.parquet`](data/laps_2026.parquet).
+
+## Method
+
+1. **Load**: `analysis/dataset.py` builds one row per lap per driver from the OpenF1 tables.
+2. **Clean**: `analysis/clean.py` drops start laps, pit in/out laps, neutralised laps, yellow
+   flags, wet running, outliers (>107 % of the driver's median) and short stints, and records
+   the reason for each.
+3. **Model**: `analysis/model.py` fits a linear mixed model
+   `lap_time ~ compound + compound:tyre_age + fuel + track_temperature` over the season, and
+   per-race models with a fixed season fuel effect (0.044 s per lap of fuel).
+4. **Validate**: lap-time forecasts with leave-one-race-out and leave-one-driver-out splits.
+5. **Strategy**: `analysis/strategy.py` computes measured pit loss, the one-stop race-time
+   curve, the optimal window and the undercut gain.
+
+Limitations (linear wear, track evolution vs. wear, no traffic model) are discussed at the end
+of the notebook.
+
+## How to run
+
+Requires Python 3.10 or newer.
 
 ```bash
+python -m venv venv && source venv/bin/activate
 pip install -r requirements-analysis.txt
-python -m analysis.dataset 2026      # → data/laps_2026.parquet (~3 мин, дальше из кеша)
 jupyter notebook notebooks/tyre_degradation.ipynb
 ```
 
-Код: `analysis/dataset.py` (сборка датасета), `clean.py` (очистка кругов),
-`model.py` (модели и валидация), `strategy.py` (окно пит-стопа, андеркат).
-
-## Установка
+The notebook runs offline on the included dataset (about 15 s). To rebuild the dataset from
+the API (about 3 min; OpenF1 is closed to free users while a session is live):
 
 ```bash
-cd f1-analytics
-python3 -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
+python -m analysis.dataset 2026
 ```
 
-## Запуск
+Tests: `python -m unittest discover tests`
 
-### Графический интерфейс (рекомендуется)
+## Also in this repo
 
-```bash
-python app.py
-```
+- **Live timing web app** ([`live/`](live/README.md)): race replay with timing tower, track
+  map, car telemetry and an in-race strategy tab that learns tyre degradation from the laps
+  completed so far. `pip install -r requirements-live.txt && python -m live openf1`
+- **FastF1 explorer** (`app.py`, `main.py`): a Tkinter app with lap-time, telemetry, position
+  and tyre-strategy plots for any session since 2018. `pip install -r requirements.txt && python app.py`.
+  FastF1 downloads session data from livetiming.formula1.com, which some networks block (HTTP 403).
 
-Откроется окно, где можно:
-- выбрать **год**, **Гран-при** (из списка) и **сессию** (R/Q/S/FP1–FP3);
-- нажать **«Загрузить сессию»**;
-- **выбрать и добавить пилотов** для анализа (списки «Доступные» → «Выбранные»);
-- построить один из графиков:
-  - **Темп по кругам** — время круга по номеру круга;
-  - **Телеметрия быстрого круга** — скорость/газ/тормоз/передача по дистанции;
-  - **Позиции в гонке** — изменение позиций (только R/Sprint);
-  - **Стратегия шин** — стинты по компаундам;
-  - **Разброс времён кругов** — box-plot.
+## License
 
-Под графиком — панель инструментов (зум, перемещение, сохранение в PNG).
-
-### CLI (без интерфейса)
-
-```bash
-python main.py
-```
-
-Сохраняет все графики в PNG. Константы `YEAR`, `GP`, `SESSION`, `DRIVERS` — в [main.py](main.py).
-
-## Структура
-
-- `app.py` — Tkinter-интерфейс;
-- `plots.py` — функции построения графиков (возвращают `matplotlib.Figure`);
-- `f1_data.py` — обёртка над FastF1 (кэш, расписание, сессии, пилоты);
-- `main.py` — CLI-пример.
-
-Данные кешируются в папке `cache/` (создаётся автоматически, не коммитить).
-
-## Live-тайминги (MVP)
-
-Онлайн-таблица таймингов и схема трассы в браузере. Новых зависимостей нет:
-сервер работает на `websockets` (ставится вместе с FastF1).
-
-```bash
-python -m live sim                              # синтетическая гонка, без сети
-python -m live live                             # живой фид (вход в F1TV, пишет recordings/*.jsonl)
-python -m live --speed 5 archive 2024 Monza     # повтор прошедшей гонки ×5
-python -m live archive 2024 Baku Qualifying
-python -m live replay recordings/live_….jsonl   # повтор своей записи
-python -m live openf1                           # последняя сессия из OpenF1 — без VPN
-python -m live --speed 8 openf1 2026 "Kuala Lumpur" Qualifying
-python -m live openf1 11730 --skip 2700         # по session_key, с 45-й минуты
-```
-
-**OpenF1** (`live/openf1.py`) — рабочий вариант без VPN: api.openf1.org
-доступен напрямую. Бесплатно отдаёт прошедшие сессии (вскоре после
-окончания), live-доступ у них платный. Таблицы OpenF1 переводятся в ту же
-ленту событий, что у SignalR-фида, поэтому всё остальное не меняется.
-Первая загрузка сессии ~1–2 мин (координаты машин), дальше — из `live_cache/`.
-
-**Управление в браузере** (для openf1 / archive / replay):
-- ▶/❚❚ — пауза (пробел), «30 / 30» — перемотка ±30 с (←/→ — ±10 с, Shift — ±1 мин);
-- скорость 0.5×…64×, ползунок — перемотка в любую точку (время от старта сессии);
-- справа — выбор сезона и сессии из OpenF1 и кнопка «Открыть»: сессия
-  грузится без перезапуска сервера, прогресс показывается рядом.
-
-**Вкладка «Телеметрия»** (в стиле F1 TV): колонка позиций, карточка
-выбранного пилота (спидометр: скорость — внешнее кольцо, газ/тормоз —
-внутреннее; обороты, передача; сектора, лучший круг, шины) и большая карта с секторами.
-Карта: колесо мыши — зум, перетаскивание — сдвиг, ➤ — слежение за пилотом.
-Режим обгона: в шапке — «Overtake вкл/выкл» (2026+) или DRS по объявлениям
-Race Control. DRS конкретной машины — из телеметрии (до 2026). Использование
-Overtake отдельным пилотом и Straight Mode в открытых данных нет.
-Телеметрия (`/car_data` OpenF1) грузится только для выбранного пилота и по
-требованию — ~3 с на пилота, дальше из кеша.
-
-**Вкладка «Strategy»** — стратегия в реальном времени, без спойлеров:
-- race trace (отрыв от лидера по кругам, SC/VSC подсвечены) и диаграмма стинтов;
-- модель шин: деградация каждого состава (с/круг ± 95 % ДИ) по чистым кругам
-  всех пилотов, проеханным к текущему моменту, и потеря на пит-стопе по реальным
-  стопам — тот же подход, что дал −20 % ошибки в ноутбуке;
-- окно пит-стопа для выбранного пилота: на какой круг заезжать и на какой
-  состав, выигрыш против «доехать без остановки».
-
-Модель — `live/history.py` (история кругов из потока патчей) и
-`live/strategy.py` (чистый Python, без pandas — сервер остаётся лёгким).
-При перемотке назад всё пересчитывается до текущего момента.
-
-Плеер (`live/player.py`) держит всю ленту событий в памяти: перемотка назад
-сбрасывает состояние и мгновенно проигрывает ленту заново до нужной точки.
-
-Открыть http://127.0.0.1:8765
-
-Конвейер: источник (live / archive / replay / sim) → запись сырого потока →
-decoder (`.z` = base64 + raw deflate) → reducer (deep-merge патчей) →
-WebSocket (состояние до 4 раз в секунду) → браузер (таблица, карта, Race Control).
-
-- `live/sources.py` — источники: SignalR Core, архив `static/*.jsonStream`, файл;
-- `live/sim.py` — симулятор гонки в формате фида F1;
-- `live/decode.py`, `live/state.py` — декодер, reducer, контур трассы, view;
-- `live/server.py` — HTTP + WebSocket и команды плеера; `live/player.py` — плеер;
-- `live/static/` — фронтенд;
-- тесты: `python -m unittest discover tests`.
-
-Контур трассы берётся из api.multiviewer.app (по ключу трассы из `SessionInfo`),
-а если он недоступен — записывается по координатам машины за первый круг.
-
-Ограничения: live-фид с 2025 года требует аккаунт F1TV (логин через FastF1,
-флаг `--no-auth` пытается без него). Для `live`/`archive` нужен доступ к
-livetiming.formula1.com (см. проблему 403 в CLAUDE.md — VPN).
-
-### Деплой на свой сервер
-
-Нужен Debian/Ubuntu с Python 3.10+ и SSH-доступ. Памяти хватает ~300 МБ
-свободных: гонка в памяти занимает ~70 МБ, пик при загрузке — ~250 МБ.
-
-```bash
-./deploy/deploy.sh root@1.2.3.4          # порт 8765; повторный запуск — обновление
-```
-
-Скрипт ставит минимальные зависимости (`requirements-live.txt`: websockets,
-certifi), создаёт пользователя `f1live`, systemd-сервис `f1-live`
-(автозапуск, перезапуск при падении, лимит памяти 450 МБ) и токен доступа.
-В конце печатает ссылку `http://IP:8765/?token=…` — после первого открытия
-токен хранится в cookie. Без токена сервер отвечает 401.
-
-Live-фид F1 с IP хостинга, скорее всего, заблокирован (403) — на сервере
-используется OpenF1.
+[MIT](LICENSE)

@@ -1,4 +1,5 @@
-fastf1
-pandas
-matplotlib
-numpy
+# FastF1 explorer (app.py, main.py). Python 3.10+; app.py also needs Tkinter.
+fastf1>=3.4
+pandas>=2.0
+matplotlib>=3.8
+numpy>=1.26
