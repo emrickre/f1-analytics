@@ -1,22 +1,16 @@
-"""Функции построения графиков. Каждая возвращает matplotlib Figure
-(чтобы её можно было встроить в Tkinter или сохранить в файл)."""
+"""Plots for the session explorer. Each returns a matplotlib Figure, so it can be
+embedded in Tkinter or saved to a file. `session` is an f1_data.Session."""
 
-import matplotlib
 from matplotlib.figure import Figure
 from matplotlib.patches import Patch
-import fastf1.plotting
+from matplotlib.ticker import MaxNLocator
 
-
-# Стиль FastF1 (цветовые схемы команд/пилотов). Без mpl_timedelta_support,
-# т.к. время кругов переводим в секунды вручную.
-try:
-    fastf1.plotting.setup_mpl(color_scheme='fastf1')
-except Exception:
-    pass
+COMPOUND_COLORS = {'SOFT': '#da291c', 'MEDIUM': '#ffd12e', 'HARD': '#f0f0ec',
+                   'INTERMEDIATE': '#43b02a', 'WET': '#0067ad'}
 
 
 def _placeholder(message):
-    """Пустая фигура с поясняющим текстом — вместо падения при отсутствии данных."""
+    """Empty figure with a note, instead of failing when there is no data."""
     fig = Figure(figsize=(9, 6))
     ax = fig.add_subplot(111)
     ax.text(0.5, 0.5, message, ha='center', va='center', wrap=True, fontsize=12)
@@ -24,193 +18,170 @@ def _placeholder(message):
     return fig
 
 
-def _driver_color(code, session):
-    """Цвет пилота через FastF1; запасной серый при ошибке."""
-    try:
-        return fastf1.plotting.get_driver_color(code, session=session)
-    except Exception:
-        return '#888888'
-
-
 def _title(session, suffix):
-    ev = session.event
-    return f'{ev["EventName"]} {ev.year} — {suffix}'
+    return f'{session.title} {session.name} — {suffix}'
 
 
 def plot_lap_times(session, driver_codes):
-    """Время круга (с) по номеру круга для выбранных пилотов."""
+    """Lap time (s) by lap number for the selected drivers."""
     if not driver_codes:
-        return _placeholder('Выберите хотя бы одного пилота')
+        return _placeholder('Select at least one driver')
 
     fig = Figure(figsize=(9, 6))
     ax = fig.add_subplot(111)
     plotted = False
     for code in driver_codes:
-        laps = session.laps.pick_drivers(code).pick_quicklaps().reset_index()
+        laps = session.quick_laps(code)
         if laps.empty:
             continue
-        ax.plot(laps['LapNumber'], laps['LapTime'].dt.total_seconds(),
-                marker='o', label=code, color=_driver_color(code, session))
+        ax.plot(laps['LapNumber'], laps['LapTime'], marker='o', markersize=3,
+                label=code, **session.style(code))
         plotted = True
 
     if not plotted:
-        return _placeholder('Нет данных кругов для выбранных пилотов')
+        return _placeholder('No lap data for the selected drivers')
 
-    ax.set_xlabel('Круг')
-    ax.set_ylabel('Время круга (с)')
-    ax.set_title(_title(session, 'темп по кругам'))
+    ax.set_xlabel('Lap')
+    ax.set_ylabel('Lap time (s)')
+    ax.set_title(_title(session, 'lap times'))
     ax.legend()
     fig.tight_layout()
     return fig
 
 
 def plot_telemetry(session, driver_codes):
-    """Скорость / газ / тормоз / передача по дистанции на быстрейшем круге."""
+    """Speed / throttle / brake / gear over distance on each driver's fastest lap."""
     if not driver_codes:
-        return _placeholder('Выберите хотя бы одного пилота')
+        return _placeholder('Select at least one driver')
 
-    channels = [('Speed', 'Скорость (км/ч)'),
-                ('Throttle', 'Газ (%)'),
-                ('Brake', 'Тормоз'),
-                ('nGear', 'Передача')]
+    channels = [('Speed', 'Speed (km/h)'),
+                ('Throttle', 'Throttle (%)'),
+                ('Brake', 'Brake'),
+                ('nGear', 'Gear')]
 
     fig = Figure(figsize=(9, 8))
     axes = fig.subplots(len(channels), 1, sharex=True)
     plotted = False
     for code in driver_codes:
-        try:
-            lap = session.laps.pick_drivers(code).pick_fastest()
-            tel = lap.get_car_data().add_distance()
-        except Exception:
+        lap = session.fastest_lap(code)
+        if lap is None:
             continue
-        if tel is None or tel.empty:
+        tel = session.lap_telemetry(code, lap)
+        if tel.empty:
             continue
-        color = _driver_color(code, session)
+        label = f'{code} {int(lap["LapTime"] // 60)}:{lap["LapTime"] % 60:06.3f}'
         for ax, (col, _) in zip(axes, channels):
-            if col in tel:
-                ax.plot(tel['Distance'], tel[col], label=code, color=color)
+            ax.plot(tel['Distance'], tel[col], label=label, **session.style(code))
         plotted = True
 
     if not plotted:
-        return _placeholder('Нет телеметрии для выбранных пилотов')
+        return _placeholder('No telemetry for the selected drivers')
 
     for ax, (_, label) in zip(axes, channels):
         ax.set_ylabel(label)
-    axes[-1].set_xlabel('Дистанция (м)')
-    axes[0].set_title(_title(session, 'телеметрия быстрейшего круга'))
-    axes[0].legend(loc='upper right')
+    axes[-1].set_xlabel('Distance (m)')
+    axes[0].set_title(_title(session, 'fastest lap telemetry'))
+    axes[0].legend(loc='lower right')
     fig.tight_layout()
     return fig
 
 
 def plot_positions(session, driver_codes):
-    """Позиция по ходу гонки (1 — сверху). Только для гонки/спринта."""
+    """Position through the race (P1 on top). Race and sprint only."""
     if not driver_codes:
-        return _placeholder('Выберите хотя бы одного пилота')
+        return _placeholder('Select at least one driver')
     if session.name not in ('Race', 'Sprint'):
-        return _placeholder('График позиций доступен только для гонки или спринта')
+        return _placeholder('Positions are available for a race or sprint only')
 
     fig = Figure(figsize=(9, 6))
     ax = fig.add_subplot(111)
     plotted = False
     for code in driver_codes:
-        laps = session.laps.pick_drivers(code)
+        laps = session.driver_laps(code)
         if laps.empty or laps['Position'].isna().all():
             continue
-        ax.plot(laps['LapNumber'], laps['Position'],
-                label=code, color=_driver_color(code, session))
+        ax.plot(laps['LapNumber'], laps['Position'], label=code, **session.style(code))
         plotted = True
 
     if not plotted:
-        return _placeholder('Нет данных о позициях для выбранных пилотов')
+        return _placeholder('No position data for the selected drivers')
 
     ax.invert_yaxis()
-    ax.set_xlabel('Круг')
-    ax.set_ylabel('Позиция')
-    ax.set_title(_title(session, 'позиции в гонке'))
+    ax.yaxis.set_major_locator(MaxNLocator(integer=True))
+    ax.set_xlabel('Lap')
+    ax.set_ylabel('Position')
+    ax.set_title(_title(session, 'positions'))
     ax.legend(bbox_to_anchor=(1.02, 1), loc='upper left')
     fig.tight_layout()
     return fig
 
 
 def plot_tyre_strategy(session, driver_codes):
-    """Стинты по компаундам шин: горизонтальные сегментные бары на каждого пилота."""
+    """Tyre stints by compound: one horizontal bar per driver."""
     if not driver_codes:
-        return _placeholder('Выберите хотя бы одного пилота')
+        return _placeholder('Select at least one driver')
 
     fig = Figure(figsize=(9, 6))
     ax = fig.add_subplot(111)
-    compounds_seen = {}
-    rows = []
+    seen, rows = {}, []
     for code in driver_codes:
-        laps = session.laps.pick_drivers(code)
-        if laps.empty:
-            continue
-        stints = (laps.groupby(['Stint', 'Compound'])
-                  .size().reset_index(name='Laps')
-                  .sort_values('Stint'))
+        stints = session.stints[session.stints['Driver'] == code].sort_values('Stint')
         if stints.empty:
             continue
-        start = 0
-        for _, st in stints.iterrows():
-            compound = st['Compound']
-            try:
-                color = fastf1.plotting.get_compound_color(compound, session=session)
-            except Exception:
-                color = '#888888'
-            compounds_seen[compound] = color
-            ax.barh(code, st['Laps'], left=start, color=color, edgecolor='black')
-            start += st['Laps']
+        for st in stints.itertuples():
+            color = COMPOUND_COLORS.get(st.Compound, '#888888')
+            seen[st.Compound] = color
+            ax.barh(code, st.LapEnd - st.LapStart + 1, left=st.LapStart - 1,
+                    color=color, edgecolor='black')
         rows.append(code)
 
     if not rows:
-        return _placeholder('Нет данных о шинах для выбранных пилотов')
+        return _placeholder('No tyre data for the selected drivers')
 
-    ax.set_xlabel('Число кругов')
-    ax.set_title(_title(session, 'стратегия шин'))
-    if compounds_seen:
-        ax.legend(handles=[Patch(color=c, label=k) for k, c in compounds_seen.items()],
-                  bbox_to_anchor=(1.02, 1), loc='upper left')
+    ax.invert_yaxis()
+    ax.set_xlabel('Lap')
+    ax.set_title(_title(session, 'tyre strategy'))
+    ax.legend(handles=[Patch(facecolor=c, edgecolor='black', label=k) for k, c in seen.items()],
+              bbox_to_anchor=(1.02, 1), loc='upper left')
     fig.tight_layout()
     return fig
 
 
 def plot_lap_distribution(session, driver_codes):
-    """Box-plot распределения времён кругов по пилотам."""
+    """Box plot of lap times per driver."""
     if not driver_codes:
-        return _placeholder('Выберите хотя бы одного пилота')
+        return _placeholder('Select at least one driver')
 
     data, labels, colors = [], [], []
     for code in driver_codes:
-        laps = session.laps.pick_drivers(code).pick_quicklaps()
-        times = laps['LapTime'].dropna().dt.total_seconds()
+        times = session.quick_laps(code)['LapTime'].dropna()
         if times.empty:
             continue
         data.append(times.values)
         labels.append(code)
-        colors.append(_driver_color(code, session))
+        colors.append(session.color(code))
 
     if not data:
-        return _placeholder('Нет данных кругов для выбранных пилотов')
+        return _placeholder('No lap data for the selected drivers')
 
     fig = Figure(figsize=(9, 6))
     ax = fig.add_subplot(111)
-    bp = ax.boxplot(data, labels=labels, patch_artist=True)
+    bp = ax.boxplot(data, tick_labels=labels, patch_artist=True)
     for patch, color in zip(bp['boxes'], colors):
         patch.set_facecolor(color)
         patch.set_alpha(0.7)
-    ax.set_ylabel('Время круга (с)')
-    ax.set_xlabel('Пилот')
-    ax.set_title(_title(session, 'разброс времён кругов'))
+    ax.set_ylabel('Lap time (s)')
+    ax.set_xlabel('Driver')
+    ax.set_title(_title(session, 'lap time distribution'))
     fig.tight_layout()
     return fig
 
 
-# Реестр для GUI: подпись -> функция
+# Registry for the GUI and CLI: label → function
 PLOTS = {
-    'Темп по кругам': plot_lap_times,
-    'Телеметрия быстрого круга': plot_telemetry,
-    'Позиции в гонке': plot_positions,
-    'Стратегия шин': plot_tyre_strategy,
-    'Разброс времён кругов': plot_lap_distribution,
+    'Lap times': plot_lap_times,
+    'Fastest lap telemetry': plot_telemetry,
+    'Positions': plot_positions,
+    'Tyre strategy': plot_tyre_strategy,
+    'Lap time distribution': plot_lap_distribution,
 }

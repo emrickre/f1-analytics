@@ -1,6 +1,6 @@
-"""Tkinter-интерфейс для анализа Формулы-1 через FastF1.
+"""Tkinter session explorer for Formula 1 (data: OpenF1).
 
-Запуск:  python app.py
+Run:  python app.py
 """
 
 import threading
@@ -22,20 +22,20 @@ class F1App:
         self.root.title('F1 Analytics')
         self.root.geometry('1200x720')
 
-        self.session = None          # текущая загруженная сессия
+        self.session = None          # loaded f1_data.Session
         self.canvas = None           # FigureCanvasTkAgg
         self.toolbar = None
 
         f1_data.enable_cache()
         self._build_ui()
 
-    # ---------- построение интерфейса ----------
+    # ---------- layout ----------
     def _build_ui(self):
         controls = ttk.Frame(self.root, padding=10)
         controls.pack(side=tk.LEFT, fill=tk.Y)
 
-        # Год
-        ttk.Label(controls, text='Год').pack(anchor='w')
+        # Season
+        ttk.Label(controls, text='Season').pack(anchor='w')
         self.year_var = tk.StringVar()
         self.year_cb = ttk.Combobox(controls, textvariable=self.year_var,
                                     state='readonly', width=24,
@@ -43,31 +43,31 @@ class F1App:
         self.year_cb.pack(fill=tk.X)
         self.year_cb.bind('<<ComboboxSelected>>', self._on_year_change)
 
-        # Гран-при
-        ttk.Label(controls, text='Гран-при').pack(anchor='w', pady=(8, 0))
+        # Grand Prix
+        ttk.Label(controls, text='Grand Prix').pack(anchor='w', pady=(8, 0))
         self.gp_var = tk.StringVar()
         self.gp_cb = ttk.Combobox(controls, textvariable=self.gp_var,
                                   state='readonly', width=24)
         self.gp_cb.pack(fill=tk.X)
 
-        # Сессия
-        ttk.Label(controls, text='Сессия').pack(anchor='w', pady=(8, 0))
+        # Session
+        ttk.Label(controls, text='Session').pack(anchor='w', pady=(8, 0))
         self.session_var = tk.StringVar(value='R')
         ttk.Combobox(controls, textvariable=self.session_var, state='readonly',
                      width=24, values=f1_data.SESSION_TYPES).pack(fill=tk.X)
 
-        self.load_btn = ttk.Button(controls, text='Загрузить сессию',
+        self.load_btn = ttk.Button(controls, text='Load session',
                                    command=self._load_session)
         self.load_btn.pack(fill=tk.X, pady=(10, 0))
 
-        # Пилоты: доступные -> выбранные
-        ttk.Label(controls, text='Пилоты').pack(anchor='w', pady=(12, 0))
+        # Drivers: available -> selected
+        ttk.Label(controls, text='Drivers').pack(anchor='w', pady=(12, 0))
         lists = ttk.Frame(controls)
         lists.pack(fill=tk.X)
 
         avail_frame = ttk.Frame(lists)
         avail_frame.pack(side=tk.LEFT)
-        ttk.Label(avail_frame, text='Доступные').pack()
+        ttk.Label(avail_frame, text='Available').pack()
         self.available_lb = tk.Listbox(avail_frame, height=10, width=10,
                                        selectmode=tk.EXTENDED, exportselection=False)
         self.available_lb.pack()
@@ -79,55 +79,55 @@ class F1App:
 
         sel_frame = ttk.Frame(lists)
         sel_frame.pack(side=tk.LEFT)
-        ttk.Label(sel_frame, text='Выбранные').pack()
+        ttk.Label(sel_frame, text='Selected').pack()
         self.selected_lb = tk.Listbox(sel_frame, height=10, width=10,
                                       selectmode=tk.EXTENDED, exportselection=False)
         self.selected_lb.pack()
 
-        # Тип графика
-        ttk.Label(controls, text='Тип графика').pack(anchor='w', pady=(12, 0))
+        # Plot type
+        ttk.Label(controls, text='Plot').pack(anchor='w', pady=(12, 0))
         self.plot_var = tk.StringVar(value=list(plots.PLOTS)[0])
         ttk.Combobox(controls, textvariable=self.plot_var, state='readonly',
                      width=24, values=list(plots.PLOTS)).pack(fill=tk.X)
 
-        self.plot_btn = ttk.Button(controls, text='Построить график',
+        self.plot_btn = ttk.Button(controls, text='Build plot',
                                    command=self._build_plot)
         self.plot_btn.pack(fill=tk.X, pady=(10, 0))
 
-        # Статус
-        self.status_var = tk.StringVar(value='Выберите год, Гран-при и сессию')
+        # Status
+        self.status_var = tk.StringVar(value='Pick a season, Grand Prix and session')
         ttk.Label(controls, textvariable=self.status_var, wraplength=200,
                   foreground='gray').pack(anchor='w', pady=(12, 0))
 
-        # Область графика
+        # Plot area
         self.plot_frame = ttk.Frame(self.root, padding=10)
         self.plot_frame.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
 
-        # Предзаполнить список Гран-при для первого года
+        # Fill the Grand Prix list for the newest season
         if self.year_cb['values']:
             self.year_cb.current(0)
             self._on_year_change()
 
-    # ---------- обработчики ----------
+    # ---------- handlers ----------
     def _on_year_change(self, event=None):
         year = self.year_var.get()
         if not year:
             return
-        self.status_var.set('Загрузка расписания…')
+        self.status_var.set('Loading schedule…')
         self.gp_cb['values'] = []
 
         def work():
             try:
                 events = f1_data.get_events(int(year))
             except Exception as exc:
-                self.root.after(0, lambda: self.status_var.set(f'Ошибка расписания: {exc}'))
+                self.root.after(0, lambda: self.status_var.set(f'Schedule error: {exc}'))
                 return
 
             def done():
                 self.gp_cb['values'] = events
                 if events:
                     self.gp_cb.current(0)
-                self.status_var.set('Готово к загрузке сессии')
+                self.status_var.set('Ready to load a session')
             self.root.after(0, done)
 
         threading.Thread(target=work, daemon=True).start()
@@ -135,11 +135,11 @@ class F1App:
     def _load_session(self):
         year, gp, stype = self.year_var.get(), self.gp_var.get(), self.session_var.get()
         if not (year and gp and stype):
-            messagebox.showwarning('F1 Analytics', 'Выберите год, Гран-при и сессию')
+            messagebox.showwarning('F1 Analytics', 'Pick a season, Grand Prix and session')
             return
 
         self.load_btn.config(state='disabled')
-        self.status_var.set(f'Загрузка {gp} {year} ({stype})… это может занять время')
+        self.status_var.set(f'Loading {gp} {year} ({stype})… the first load takes a few seconds')
 
         def work():
             try:
@@ -154,8 +154,8 @@ class F1App:
 
     def _load_failed(self, exc):
         self.load_btn.config(state='normal')
-        self.status_var.set(f'Ошибка загрузки: {exc}')
-        messagebox.showerror('F1 Analytics', f'Не удалось загрузить сессию:\n{exc}')
+        self.status_var.set(f'Load error: {exc}')
+        messagebox.showerror('F1 Analytics', f'Could not load the session:\n{exc}')
 
     def _load_done(self, session, drivers):
         self.session = session
@@ -164,8 +164,8 @@ class F1App:
         for d in drivers:
             self.available_lb.insert(tk.END, d)
         self.load_btn.config(state='normal')
-        self.status_var.set(f'Сессия загружена: {len(drivers)} пилотов. '
-                            f'Добавьте пилотов и постройте график.')
+        self.status_var.set(f'Session loaded: {len(drivers)} drivers. '
+                            f'Add drivers and build a plot.')
 
     def _add_drivers(self):
         existing = set(self.selected_lb.get(0, tk.END))
@@ -180,27 +180,27 @@ class F1App:
 
     def _build_plot(self):
         if self.session is None:
-            messagebox.showwarning('F1 Analytics', 'Сначала загрузите сессию')
+            messagebox.showwarning('F1 Analytics', 'Load a session first')
             return
         drivers = list(self.selected_lb.get(0, tk.END))
         if not drivers:
-            messagebox.showwarning('F1 Analytics', 'Добавьте хотя бы одного пилота')
+            messagebox.showwarning('F1 Analytics', 'Add at least one driver')
             return
 
         plot_fn = plots.PLOTS[self.plot_var.get()]
-        self.status_var.set('Построение графика…')
+        self.status_var.set('Building plot…')
         try:
             fig = plot_fn(self.session, drivers)
         except Exception as exc:
-            self.status_var.set(f'Ошибка построения: {exc}')
-            messagebox.showerror('F1 Analytics', f'Ошибка построения графика:\n{exc}')
+            self.status_var.set(f'Plot error: {exc}')
+            messagebox.showerror('F1 Analytics', f'Could not build the plot:\n{exc}')
             return
 
         self._show_figure(fig)
-        self.status_var.set('Готово')
+        self.status_var.set('Done')
 
     def _show_figure(self, fig):
-        # Убрать предыдущий график
+        # Remove the previous plot
         if self.toolbar is not None:
             self.toolbar.destroy()
         if self.canvas is not None:
