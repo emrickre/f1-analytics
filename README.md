@@ -72,9 +72,15 @@ Tests: `python -m unittest discover tests`
 - **Live timing web app** ([`live/`](live/README.md)): race replay with timing tower, track
   map, car telemetry and an in-race strategy tab that learns tyre degradation from the laps
   completed so far. `pip install -r requirements-live.txt && python -m live openf1`
-- **FastF1 explorer** (`app.py`, `main.py`): a Tkinter app with lap-time, telemetry, position
-  and tyre-strategy plots for any session since 2018. `pip install -r requirements.txt && python app.py`.
-  FastF1 downloads session data from livetiming.formula1.com, which some networks block (HTTP 403).
+- **Session explorer** (`app.py`, `main.py`, `f1_data.py`, `plots.py`): a Tkinter app and CLI
+  with lap times, fastest-lap telemetry, positions, tyre strategy and lap-time distribution for
+  any session since 2023. Data comes from OpenF1 as FastF1-like tables, because FastF1's source
+  (livetiming.formula1.com) is blocked on many networks.
+  ```bash
+  pip install -r requirements.txt
+  python app.py                                   # GUI
+  python main.py 2024 "Las Vegas" R NOR PIA      # save all plots to figures/
+  ```
 
 ## License
 

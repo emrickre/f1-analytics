@@ -1,5 +1,5 @@
-# FastF1 explorer (app.py, main.py). Python 3.10+; app.py also needs Tkinter.
-fastf1>=3.4
+# Session explorer (app.py, main.py), data from OpenF1. Python 3.10+; app.py also needs Tkinter.
 pandas>=2.0
-matplotlib>=3.8
 numpy>=1.26
+matplotlib>=3.9
+certifi
