@@ -185,8 +185,9 @@ def build_session(raw, key, year, event, name, finished=True, src=None):
         classification = {code_of[n]: int(p) for n, p in zip(last['driver_number'], last['position'])
                           if n in code_of}
     if name in RACE_SESSIONS and not pos.empty and laps['LapStartDate'].notna().any():
-        pos['date'] = pd.to_datetime(pos['date'], utc=True, format='ISO8601')
-        end = laps['LapStartDate'] + pd.to_timedelta(laps['LapTime'], unit='s')
+        # Same resolution on both keys: pandas 3 parses to µs, Timedelta math gives ns
+        pos['date'] = pd.to_datetime(pos['date'], utc=True, format='ISO8601').astype('datetime64[ns, UTC]')
+        end = (laps['LapStartDate'] + pd.to_timedelta(laps['LapTime'], unit='s')).astype('datetime64[ns, UTC]')
         q = laps.assign(_end=end).dropna(subset=['_end'])
         merged = pd.merge_asof(
             q.reset_index().sort_values('_end'), pos.sort_values('date'),
