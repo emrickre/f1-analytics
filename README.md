@@ -36,7 +36,8 @@ or on the track, and when is the optimal moment to pit?
 Every race lap of the 2026 season from the [OpenF1](https://openf1.org) API: lap and sector
 times, tyre compound and age, pit stops, Safety Car / VSC / flags, track temperature.
 18,405 laps from 16 races, 14,263 after cleaning. The dataset is included in
-[`data/laps_2026.parquet`](data/laps_2026.parquet).
+[`data/laps_2026.parquet`](data/laps_2026.parquet); it is derived from OpenF1 data and shared under
+the same license (see [License](#license)).
 
 ## Method
 
@@ -107,4 +108,10 @@ OpenF1's interval feed: median difference 0.1 s), giving 131 pit-stop pairs in 1
 
 ## License
 
-[MIT](LICENSE)
+- **Code**: [MIT](LICENSE).
+- **Data**: lap data comes from [OpenF1](https://openf1.org), licensed under
+  [CC BY-NC-SA 4.0](https://creativecommons.org/licenses/by-nc-sa/4.0/). The derived dataset in
+  `data/` is shared under the same terms: non-commercial use, with attribution to OpenF1.
+
+This is a personal, non-commercial project. It is not associated with Formula 1 or any of its
+companies; F1, FORMULA 1 and related marks are trademarks of Formula One Licensing B.V.
