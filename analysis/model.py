@@ -71,8 +71,14 @@ def compound_offsets(result):
 # по каждой гонке. Топливо берём общим по сезону (fuel из fit_season): внутри
 # одной гонки возраст шин и запас топлива слишком коррелируют.
 
-def fit_race(df_race, fuel):
-    """OLS внутри гонки по времени с поправкой на топливо; темп пилота — фикс. эффект."""
+def fit_race(df_race, fuel, evolution=False, curve=False):
+    """OLS внутри гонки по времени с поправкой на топливо; темп пилота — фикс. эффект.
+
+    evolution — член `lap_number`: трасса «прикатывается» и ускоряется по ходу гонки
+    (с/круг гонки, отрицательный — быстрее). Отделим от износа, потому что пилоты
+    меняют шины на разных кругах: возраст шин и номер круга не совпадают.
+    curve — квадратичный член по возрасту шин (прогрев в начале стинта, «обрыв» в конце).
+    """
     present = [c for c in COMPOUNDS if (df_race['compound'] == c).sum() >= 30]
     if not present:
         raise ValueError('мало кругов сухих составов')
@@ -81,19 +87,34 @@ def fit_race(df_race, fuel):
     base = 'MEDIUM' if 'MEDIUM' in present else present[0]
     drivers = ' + C(driver)' if d['driver'].nunique() > 1 else ''
     comp = f'C(compound, Treatment("{base}"))'
-    f = (f'lap_time_fc ~ {comp} + {comp}:tyre_age{drivers}' if len(present) > 1
-         else f'lap_time_fc ~ tyre_age{drivers}')
+    if len(present) > 1:
+        f = f'lap_time_fc ~ {comp} + {comp}:tyre_age'
+        f += f' + {comp}:I(tyre_age ** 2)' if curve else ''
+    else:
+        f = 'lap_time_fc ~ tyre_age' + (' + I(tyre_age ** 2)' if curve else '')
+    f += (' + lap_number' if evolution else '') + drivers
     res = smf.ols(f, d).fit()
     res.base_compound, res.compounds, res.fuel = base, present, fuel
     return res
 
 
 def race_params(result):
-    """Из модели гонки: смещения составов (с) и деградация (с/круг) — для стратегии."""
-    deg, off = {}, {c: 0.0 for c in result.compounds}
+    """Из модели гонки: смещения составов (с) и деградация (с/круг) — для стратегии.
+
+    Дополнительно: `evolution` — эволюция трассы (с/круг гонки, 0 если не оценивалась),
+    `deg2` — квадратичные коэффициенты износа (пусто, если curve=False).
+    """
+    deg, off, deg2 = {}, {c: 0.0 for c in result.compounds}, {}
     for name, value in result.params.items():
         if name == 'tyre_age':
             deg[result.compounds[0]] = value
+            continue
+        if name == 'I(tyre_age ** 2)':
+            deg2[result.compounds[0]] = value
+            continue
+        m = re.search(r'\[T?\.?(\w+)\]:I\(tyre_age \*\* 2\)$', name)
+        if m:
+            deg2[m.group(1)] = value
             continue
         m = re.search(r'\[T?\.?(\w+)\]:tyre_age$', name)
         if m:
@@ -102,15 +123,16 @@ def race_params(result):
         m = re.fullmatch(r'C\(compound, Treatment\("\w+"\)\)\[T\.(\w+)\]', name)
         if m:
             off[m.group(1)] = value
-    return {'deg': deg, 'offset': off, 'fuel': result.fuel}
+    return {'deg': deg, 'offset': off, 'fuel': result.fuel, 'deg2': deg2,
+            'evolution': result.params.get('lap_number', 0.0)}
 
 
-def deg_by_race(df, fuel):
-    """Деградация каждого состава в каждой гонке (с ДИ)."""
+def deg_by_race(df, fuel, evolution=False):
+    """Деградация каждого состава в каждой гонке (с ДИ); evolution — см. fit_race."""
     rows = []
     for race, d in df.groupby('race', sort=False):
         try:
-            r = fit_race(d, fuel)
+            r = fit_race(d, fuel, evolution=evolution)
         except (ValueError, np.linalg.LinAlgError):
             continue
         ci = r.conf_int()
@@ -121,7 +143,8 @@ def deg_by_race(df, fuel):
                 rows.append({'race': race, 'compound': comp, 'deg_s_per_lap': value,
                              'ci_low': ci.loc[name, 0], 'ci_high': ci.loc[name, 1],
                              'laps': int((d['compound'] == comp).sum()),
-                             'track_temp': d['track_temperature'].mean()})
+                             'track_temp': d['track_temperature'].mean(),
+                             'evolution': r.params.get('lap_number', np.nan)})
     return pd.DataFrame(rows)
 
 
@@ -138,21 +161,29 @@ def paired_compound_diff(by_race, compound, base='MEDIUM'):
 def stint_forecast_errors(test, deg, fuel, ref_laps=3, min_ahead=3):
     """Ошибки прогноза внутри стинта по первым ref_laps чистым кругам.
 
-    deg — {состав: с/круг} или функция (session_key, driver, состав) → с/круг.
-    Модель: t = t_ref + deg·(age − age_ref) − fuel·(laps_rem_ref − laps_rem).
+    deg — {состав: с/круг} или функция (session_key, driver, состав) → с/круг либо
+    dict {'deg', 'deg2', 'evolution'} (квадратичный износ и эволюция трассы).
+    Модель: t = t_ref + износ(age) − износ(age_ref) + evolution·(lap − lap_ref)
+                + fuel·(laps_rem − laps_rem_ref),  износ(a) = deg·a + deg2·a².
     Базовая линия: «темп не меняется» (t = t_ref).
     """
     get = deg if callable(deg) else (lambda key, drv, c: deg.get(c))
     errs = []
     for (key, drv, _), s in test.groupby(['session_key', 'driver_number', 'stint']):
         s = s.sort_values('lap_number')
-        d = get(key, drv, s['compound'].iloc[0])
+        p = get(key, drv, s['compound'].iloc[0])
+        if isinstance(p, dict):
+            d, d2, evo = p.get('deg'), p.get('deg2') or 0.0, p.get('evolution') or 0.0
+        else:
+            d, d2, evo = p, 0.0, 0.0
         if len(s) < ref_laps + min_ahead or d is None:
             continue
         ref, ahead = s.iloc[:ref_laps], s.iloc[ref_laps:]
         t0 = ref['lap_time'].mean()
-        a0, r0 = ref['tyre_age'].mean(), ref['laps_remaining'].mean()
-        pred = t0 + d * (ahead['tyre_age'] - a0) + fuel * (ahead['laps_remaining'] - r0)
+        r0, l0 = ref['laps_remaining'].mean(), ref['lap_number'].mean()
+        wear = lambda a: d * a + d2 * a ** 2                     # noqa: E731
+        pred = (t0 + wear(ahead['tyre_age']) - wear(ref['tyre_age']).mean()
+                + evo * (ahead['lap_number'] - l0) + fuel * (ahead['laps_remaining'] - r0))
         errs.append(pd.DataFrame({'model': (ahead['lap_time'] - pred).abs(),
                                   'baseline': (ahead['lap_time'] - t0).abs(),
                                   'laps_ahead': np.arange(1, len(ahead) + 1)}))
@@ -173,10 +204,11 @@ def leave_one_race_out(df):
     return pd.DataFrame(rows)
 
 
-def leave_one_driver_out(df, fuel):
+def leave_one_driver_out(df, fuel, evolution=False, curve=False):
     """Деградация трассы по ДРУГИМ пилотам той же гонки → прогноз для пилота.
 
     Так работают стратеги: оценивают износ по соперникам, уже проехавшим стинт.
+    evolution / curve — варианты модели (см. fit_race).
     """
     rows = []
     for race, d in df.groupby('race', sort=False):
@@ -185,10 +217,15 @@ def leave_one_driver_out(df, fuel):
         def deg(key, drv, comp):
             if drv not in cache:
                 try:
-                    cache[drv] = race_params(fit_race(d[d['driver_number'] != drv], fuel))['deg']
+                    cache[drv] = race_params(fit_race(d[d['driver_number'] != drv], fuel,
+                                                      evolution=evolution, curve=curve))
                 except (ValueError, np.linalg.LinAlgError):
-                    cache[drv] = {}
-            return cache[drv].get(comp)
+                    cache[drv] = {'deg': {}}
+            p = cache[drv]
+            if not (evolution or curve):
+                return p['deg'].get(comp)
+            return {'deg': p['deg'].get(comp), 'deg2': p.get('deg2', {}).get(comp, 0.0),
+                    'evolution': p.get('evolution', 0.0)}
 
         e = stint_forecast_errors(d, deg, fuel)
         if not e.empty:

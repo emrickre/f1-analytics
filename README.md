@@ -20,10 +20,16 @@ or on the track, and when is the optimal moment to pit?
   in 12 of 16 races.
 - **Belgian GP case.** The model's optimal one-stop lap (16, window 12–21) matches the laps the
   teams actually chose (14–17).
+- **Beyond a linear model.** A track-specific quadratic wear curve cuts the forecast error further,
+  to **24 %** (MAE 0.73 s). Separating track evolution (the track typically gets 0.01 s/lap faster)
+  removes most of the impossible negative-wear estimates, but it does not make the pit-window
+  choice more reliable, so strategy keeps the simpler model.
 
 ![Degradation by race and compound](docs/degradation_by_track.png)
 
 ![Lap-time forecast error by race](docs/forecast_error.png)
+
+![Tyre wear once track evolution is separated](docs/track_evolution.png)
 
 ## Data
 
@@ -41,7 +47,9 @@ times, tyre compound and age, pit stops, Safety Car / VSC / flags, track tempera
 3. **Model**: `analysis/model.py` fits a linear mixed model
    `lap_time ~ compound + compound:tyre_age + fuel + track_temperature` over the season, and
    per-race models with a fixed season fuel effect (0.045 s per lap of fuel).
-4. **Validate**: lap-time forecasts with leave-one-race-out and leave-one-driver-out splits.
+4. **Validate**: lap-time forecasts with leave-one-race-out and leave-one-driver-out splits;
+   per-race variants with a track-evolution term (`lap_number`) and quadratic wear are compared
+   on the same task.
 5. **Strategy**: `analysis/strategy.py` computes measured pit loss, the one-stop race-time
    curve, the optimal window and the undercut gain.
 

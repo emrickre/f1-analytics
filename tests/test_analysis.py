@@ -93,9 +93,12 @@ class CleanTest(unittest.TestCase):
         self.assertEqual(report['stint shorter than 4 clean laps'], 3)
 
 
-def synthetic_race(deg=None, fuel=0.04, n_laps=50, drivers=12, noise=0.15, seed=0):
-    """Круги с известной деградацией и эффектом топлива."""
+def synthetic_race(deg=None, fuel=0.04, n_laps=50, drivers=12, noise=0.15, seed=0,
+                   evolution=0.0, quad=None):
+    """Круги с известной деградацией, эффектом топлива, эволюцией трассы
+    (с/круг гонки) и квадратичным износом (с/круг²) по составам."""
     deg = deg or {'MEDIUM': 0.08, 'HARD': 0.04}
+    quad = quad or {}
     rng = np.random.default_rng(seed)
     rows = []
     for d in range(drivers):
@@ -104,7 +107,8 @@ def synthetic_race(deg=None, fuel=0.04, n_laps=50, drivers=12, noise=0.15, seed=
         first, second = ('MEDIUM', 'HARD') if d % 2 else ('HARD', 'MEDIUM')
         for lap in range(2, n_laps + 1):
             comp, age = (first, lap - 1) if lap <= stop else (second, lap - stop)
-            t = pace + deg[comp] * age + fuel * (n_laps - lap) + rng.normal(0, noise)
+            t = (pace + deg[comp] * age + quad.get(comp, 0.0) * age ** 2
+                 + fuel * (n_laps - lap) + evolution * lap + rng.normal(0, noise))
             rows.append({'race': 'Test GP', 'session_key': 1, 'driver_number': d,
                          'driver': f'D{d}', 'lap_number': lap, 'lap_time': t,
                          'compound': comp, 'tyre_age': age, 'stint': 1 + (lap > stop),
@@ -128,6 +132,28 @@ class ModelTest(unittest.TestCase):
         self.assertAlmostEqual(M.fuel_effect(res)[0], 0.04, delta=0.01)
         deg = M.degradation(res)['deg_s_per_lap']
         self.assertAlmostEqual(deg['MEDIUM'], 0.08, delta=0.01)
+
+    def test_track_evolution_separated_from_wear(self):
+        # Трасса ускоряется на 0.03 с/круг; пилоты меняют шины на разных кругах
+        df = synthetic_race(evolution=-0.03)
+        p = M.race_params(M.fit_race(df, fuel=0.04, evolution=True))
+        self.assertAlmostEqual(p['evolution'], -0.03, delta=0.005)
+        self.assertAlmostEqual(p['deg']['MEDIUM'], 0.08, delta=0.01)
+        self.assertAlmostEqual(p['deg']['HARD'], 0.04, delta=0.01)
+        # Без члена эволюции ускорение трассы «съедает» часть износа
+        naive = M.race_params(M.fit_race(df, fuel=0.04))
+        self.assertLess(naive['deg']['MEDIUM'], 0.08 - 0.015)
+        self.assertEqual(naive['evolution'], 0.0)
+
+    def test_quadratic_wear(self):
+        df = synthetic_race(quad={'MEDIUM': 0.002}, seed=1)
+        p = M.race_params(M.fit_race(df, fuel=0.04, curve=True))
+        self.assertAlmostEqual(p['deg2']['MEDIUM'], 0.002, delta=0.0005)
+        self.assertAlmostEqual(p['deg2']['HARD'], 0.0, delta=0.0005)
+        # Прогноз внутри стинта с кривой точнее линейного
+        lin = M.leave_one_driver_out(df.assign(race='R'), 0.04)
+        cur = M.leave_one_driver_out(df.assign(race='R'), 0.04, curve=True)
+        self.assertLess(cur['mae_model'].iloc[0], lin['mae_model'].iloc[0])
 
     def test_forecast_beats_flat_baseline(self):
         df = synthetic_race()
