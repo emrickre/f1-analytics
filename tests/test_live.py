@@ -3,6 +3,7 @@
 import asyncio
 import json
 import unittest
+from datetime import datetime, timedelta, timezone
 
 from live.decode import decode_z, encode_z
 from live.openf1 import CarData, OpenF1Source, compact_locations
@@ -180,6 +181,61 @@ class LiveStrategyTest(unittest.TestCase):
         # Мало кругов до финиша — останавливаться невыгодно
         self.assertLess(LS.pit_window(deg, 'MEDIUM', 5, 8, 20.0)[0]['gain'], 0)
 
+    def test_pit_window_wet(self):
+        deg = {'INTERMEDIATE': {'deg': 0.15, 'n': 100}, 'WET': {'deg': 0.05, 'n': 100},
+               'HARD': {'deg': 0.01, 'n': 100}}
+        w = LS.pit_window(deg, 'INTERMEDIATE', 10, 40, 20.0)
+        # Дождевые → дождевые, включая свежий комплект; на сухие не советуем
+        self.assertEqual({o['compound'] for o in w}, {'INTERMEDIATE', 'WET'})
+        # Сухие → только другой сухой состав
+        self.assertEqual([o['compound'] for o in LS.pit_window(deg, 'HARD', 10, 40, 20.0)], [])
+
+    def test_wet_laps_modelled(self):
+        st = SessionState()
+        st.apply('TrackStatus', {'Status': '1'})
+        st.apply('LapCount', {'CurrentLap': 20, 'TotalLaps': 50})
+        for d in range(4):
+            for lap in range(1, 21):
+                # трасса подсыхает: круги быстреют на 0.1 с
+                feed_lap(st, str(d), lap, 100 + d * 0.3 - 0.1 * lap, d + 1, f'+{d * 2.0}',
+                         comp='INTERMEDIATE', age=lap)
+        v = LS.strategy_view(st)
+        self.assertTrue(v['deg']['INTERMEDIATE']['improving'])
+        self.assertTrue(v['windows']['0']['wet'])
+
+    def fl_state(self, year=2024, name='Race', gap_behind='+30.000', pos=1, at=45):
+        st = SessionState()
+        st.apply('SessionInfo', {'Type': 'Race', 'Name': name, 'StartDate': f'{year}-11-03T17:00:00'})
+        st.apply('DriverList', {'1': {'Tla': 'NOR'}, '2': {'Tla': 'PIA'}})
+        st.apply('TrackStatus', {'Status': '1'})
+        st.apply('LapCount', {'CurrentLap': at, 'TotalLaps': 50})
+        other = 2 if pos == 1 else pos - 1
+        for lap in range(1, at + 1):
+            feed_lap(st, '1', lap, 90.0, pos, '', comp='HARD', age=lap)
+            feed_lap(st, '2', lap, 91.0, pos + 1 if pos == 1 else other, '', comp='HARD', age=lap)
+        st.apply('TimingData', {'Lines': {
+            '1': {'BestLapTime': {'Value': '1:29.500'}},
+            '2': {'BestLapTime': {'Value': '1:29.000'},
+                  'IntervalToPositionAhead': {'Value': gap_behind if pos == 1 else '+1.0'}}}})
+        return st
+
+    def test_fastest_lap_stop(self):
+        fl = LS.strategy_view(self.fl_state())['windows']['1']['fastestLap']
+        self.assertEqual(fl['status'], 'free')
+        self.assertEqual(fl['window'], [46, 48])                  # заезд не позже total−2
+        self.assertEqual((fl['holder'], fl['record']), ('PIA', 89.0))
+        self.assertAlmostEqual(fl['pace'], 90.0)
+        view = lambda **kw: LS.strategy_view(self.fl_state(**kw))['windows']['1']['fastestLap']
+        loss = fl['loss']
+        self.assertEqual(view(gap_behind=f'+{loss - 1:.3f}')['status'], 'tight')
+        self.assertEqual(view(gap_behind=f'+{loss - 5:.3f}')['status'], 'no')
+        self.assertEqual(view(gap_behind='1 L')['status'], 'free')
+        self.assertIsNone(view(year=2025))                         # очко отменили
+        self.assertIsNone(view(name='Sprint'))
+        self.assertIsNone(view(at=30))                             # рано
+        self.assertIsNone(view(at=48))                             # поздно: не успеть
+        self.assertIsNone(view(pos=11))                            # вне очков
+
     def test_view(self):
         v = LS.strategy_view(self.synthetic())
         self.assertEqual(v['totalLaps'], 50)
@@ -311,6 +367,77 @@ class OpenF1Test(unittest.TestCase):
         self.assertTrue(v['rcm'][0]['utc'].endswith('Z'))
         self.assertEqual(v['cars']['1']['x'], 100)
         self.assertEqual(v['session']['meeting'], 'Test GP')
+
+    def test_pit_exit_at_date(self):
+        # Стоп под красным флагом: `date` — выезд из пит-лейна, lane_duration
+        # уже включён; круг после рестарта не должен считаться кругом выезда
+        T = lambda s: (datetime(2026, 10, 3, 8, tzinfo=timezone.utc)
+                       + timedelta(seconds=s)).isoformat()
+        laps = [{'driver_number': 1, 'lap_number': n, 'date_start': T(s), 'lap_duration': dur}
+                for n, s, dur in ((1, 0, 90), (2, 90, 1300), (3, 1390, 90), (4, 1480, 90))]
+        d = {'session': {'session_key': 1, 'session_type': 'Race', 'session_name': 'Race',
+                         'date_start': T(0), 'date_end': T(3600), 'circuit_key': 1,
+                         'circuit_short_name': 'X', 'location': 'X', 'year': 2026},
+             'meeting': {'meeting_name': 'Test GP'},
+             'drivers': [{'driver_number': 1, 'name_acronym': 'NOR', 'team_colour': 'F47600'}],
+             'laps': laps, 'stints': [], 'intervals': [], 'weather': [], 'position': [],
+             'race_control': [], 'location': {},
+             'pit': [{'driver_number': 1, 'lap_number': 1, 'date': T(1290),
+                      'lane_duration': 1200.0}]}
+        inpit = [(t, data['Lines']['1']['InPit']) for t, topic, data in OpenF1Source.timeline(d)
+                 if topic == 'TimingData' and 'InPit' in data.get('Lines', {}).get('1', {})]
+        self.assertEqual([(int((t - datetime.fromisoformat(T(0))).total_seconds()), v)
+                          for t, v in inpit], [(90, True), (1290, False)])
+
+
+class OpenF1LockedTest(unittest.TestCase):
+    """Во время live-сессии OpenF1 отвечает 401 на всё — работаем с диска."""
+
+    def setUp(self):
+        import os
+        import tempfile
+        import live.openf1 as O
+        self.O, self.cwd = O, os.getcwd()
+        self.tmp = tempfile.TemporaryDirectory()
+        os.chdir(self.tmp.name)
+        O._catalog.clear()
+        self.real_get, self.calls = O.http_get, []
+        self.locked = False
+        sess = {'session_key': 7, 'meeting_key': 1, 'session_name': 'Race',
+                'date_start': '2024-11-03T15:00:00+00:00', 'date_end': '2024-11-03T17:00:00+00:00',
+                'location': 'Sao Paulo'}
+
+        def fake(url, timeout=30):
+            import io
+            import urllib.error
+            self.calls.append(url)
+            if self.locked:
+                raise urllib.error.HTTPError(url, 401, 'Unauthorized', {}, io.BytesIO(b''))
+            body = [sess] if '/sessions' in url else [{'meeting_key': 1, 'meeting_name': 'Brazil GP'}]
+            return json.dumps(body).encode()
+        O.http_get = fake
+        from unittest import mock
+        self.no_sleep = mock.patch.object(O.time, 'sleep', lambda s: None)
+        self.no_sleep.start()
+
+    def tearDown(self):
+        import os
+        self.O.http_get = self.real_get
+        self.no_sleep.stop()
+        os.chdir(self.cwd)
+        self.tmp.cleanup()
+
+    def test_catalog_and_session_from_disk(self):
+        O = self.O
+        self.assertEqual(O.catalog(2024)[0]['meeting'], 'Brazil GP')     # сохраняет на диск
+        O._catalog.clear()
+        self.locked = True
+        self.assertEqual(O.catalog(2024)[0]['key'], 7)                   # с диска
+        n = len(self.calls)
+        self.assertEqual(O.OpenF1Source(7).resolve()['session_name'], 'Race')
+        self.assertEqual(len(self.calls), n)                             # без сети
+        with self.assertRaises(O.OpenF1Locked):
+            O.OpenF1Source('latest').resolve()
 
 
 class PlayerTest(unittest.TestCase):

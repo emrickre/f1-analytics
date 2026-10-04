@@ -11,7 +11,7 @@
 import math
 from statistics import median
 
-from .history import DRY
+from .history import DRY, WET, lap_seconds, parse_gap
 
 FUEL = 0.044            # с за каждый оставшийся круг топлива — оценка по сезону 2026 (ноутбук)
 DEFAULT_PIT_LOSS = 22.0
@@ -19,13 +19,18 @@ OUTLIER = 1.07
 MIN_STINT = 4
 MIN_LAPS_FOR_ESTIMATE = 30
 WINDOW_TOLERANCE = 1.0  # с — «окно» кругов, где проигрыш оптимуму меньше этого
+FL_SEASONS = range(2019, 2025)  # очко за быстрейший круг (при финише в топ-10)
+FL_LAPS = 10            # стоп «на быстрейший круг» предлагаем в последних кругах
+FL_MARGIN = 1.0         # с — запас отрыва от машины сзади сверх потери на пит-стоп
+FL_TIGHT = 3.0          # с — меньше отрыв ещё возможен: на свежем SOFT круг выезда
+                        # быстрее среднего стопа (Лас-Вегас 2024, NOR: 21.2 с против 23.6)
 
 
 def clean_laps(history):
     """Чистые круги темпа: [(num, row)] — те же правила, что analysis/clean.py."""
     rows = [(num, r) for num, laps in history.laps.items() for r in laps
             if r['t'] and r['lap'] > 1 and not (r['in'] or r['out'] or r['dirty'])
-            and r['comp'] in DRY and r['age'] is not None]
+            and r['comp'] in DRY + WET and r['age'] is not None]
     by_driver = {}
     for num, r in rows:
         by_driver.setdefault(num, []).append(r['t'])
@@ -113,9 +118,11 @@ def pit_window(deg, compound, age, laps_left, loss, min_new_stint=3):
     # которые молодеют: для решения о пит-стопе считаем её нулём.
     d_cur = max(cur['deg'], 0.0)
     stay = _stint_cost(d_cur, age, laps_left)
+    same_class = WET if compound in WET else DRY
     out = []
     for comp, d in deg.items():
-        if comp == compound or d['n'] < MIN_LAPS_FOR_ESTIMATE:
+        if (comp not in same_class or d['n'] < MIN_LAPS_FOR_ESTIMATE
+                or (comp == compound and compound in DRY)):
             continue
         d_new = max(d['deg'], 0.0)
         costs = [(k, _stint_cost(d_cur, age, k) + loss
@@ -126,6 +133,74 @@ def pit_window(deg, compound, age, laps_left, loss, min_new_stint=3):
         out.append({'compound': comp, 'in_laps': best_k, 'window': (min(ok), max(ok)),
                     'gain': stay - best})
     return sorted(out, key=lambda w: -w['gain'])
+
+
+def fastest_lap_stop(state, num, laps, total, deg, loss):
+    """Поздний стоп на свежий SOFT ради очка за быстрейший круг (сезоны 2019–2024).
+
+    Предлагается пилоту из топ-10 за ≤ FL_LAPS кругов до финиша. status: 'free' —
+    отрыв от машины сзади больше потери на пит-стоп + FL_MARGIN (или она отстаёт
+    на круг), 'tight' — не меньше потери − FL_TIGHT (риск потерять место), иначе 'no'. Круг заезда — не позже чем за 2 круга до финиша: круг выезда
+    и хотя бы один быстрый. → dict или None, если вариант неприменим.
+    """
+    d = state.data
+    info = d.get('SessionInfo') or {}
+    year = str(info.get('StartDate') or '')[:4]
+    if (not year.isdigit() or int(year) not in FL_SEASONS
+            or info.get('Type') != 'Race' or 'sprint' in str(info.get('Name', '')).lower()):
+        return None
+    last = laps[-1]
+    left = total - last['lap']
+    # Заезд не позже круга total−2 → нужно ≥ 3 круга до финиша
+    if last['comp'] not in DRY or not 3 <= left <= FL_LAPS:
+        return None
+    lines = (d.get('TimingData') or {}).get('Lines') or {}
+    pos = {}
+    for n, line in lines.items():
+        try:
+            pos[int(line.get('Position') or 0)] = n
+        except (TypeError, ValueError):
+            pass
+    me = next((p for p, n in pos.items() if n == num), None)
+    if not me or me > 10:
+        return None
+
+    # Отрыв от машины сзади: её интервал до позиции впереди (то есть до нас)
+    behind = pos.get(me + 1)
+    gap, lapped = None, behind is None
+    if behind:
+        line = lines[behind]
+        if line.get('Retired') or line.get('Stopped'):
+            lapped = True
+        else:
+            gap, down = parse_gap((line.get('IntervalToPositionAhead') or {}).get('Value'), None)
+            lapped = down > 0
+    status = ('free' if lapped or (gap is not None and gap > loss + FL_MARGIN)
+              else 'tight' if gap is not None and gap > loss - FL_TIGHT else 'no')
+
+    # Быстрейший круг гонки сейчас
+    best = [(t, n) for n, line in lines.items()
+            if (t := lap_seconds((line.get('BestLapTime') or {}).get('Value')))]
+    record, holder = min(best) if best else (None, None)
+
+    # Темп: медиана последних трёх нормальных кругов; свежие шины вернут износ
+    recent = [r['t'] for r in laps[-6:] if r['t'] and not (r['in'] or r['out'] or r['dirty'])][-3:]
+    pace = median(recent) if recent else None
+    cur = deg.get(last['comp'])
+    recovered = max(cur['deg'], 0.0) * last['age'] if cur else 0.0
+    drivers = d.get('DriverList') or {}
+    tla = lambda n: (drivers.get(n) or {}).get('Tla') or n
+    return {
+        'status': status, 'gapBehind': gap, 'lapped': lapped,
+        'behind': tla(behind) if behind else None,
+        'loss': loss,
+        'window': [max(last['lap'] + 1, total - 4), total - 2],
+        'record': record, 'holder': tla(holder) if holder else None, 'mine': holder == num,
+        'pace': pace, 'recovered': recovered,
+        # > 0 — свежие шины по оценке износа не хватает до рекорда (сцепление
+        # SOFT сверх этого модель не оценивает)
+        'need': (pace - recovered - FUEL * 2 - record) if pace and record else None,
+    }
 
 
 # --- для фронтенда --------------------------------------------------------------
@@ -147,15 +222,16 @@ def strategy_view(state):
                           r['stint'], int(r['in']) | int(r['out']) << 1 | int(r['dirty']) << 2]
                          for r in laps]
         last = laps[-1] if laps else None
-        if last and total and last['comp'] in DRY and last['age'] is not None:
+        if last and total and last['comp'] in DRY + WET and last['age'] is not None:
             left = int(total) - last['lap']
             windows[num] = {
                 'compound': last['comp'], 'age': last['age'], 'lap': last['lap'],
-                'laps_left': left,
+                'laps_left': left, 'wet': last['comp'] in WET,
                 # Круг заезда: после k кругов на старых шинах (k=0 — в конце текущего).
                 'options': [dict(w, stop_lap=last['lap'] + max(1, w['in_laps']),
                                  window=[last['lap'] + max(1, k) for k in w['window']])
                             for w in pit_window(deg, last['comp'], last['age'], left, loss)],
+                'fastestLap': fastest_lap_stop(state, num, laps, int(total), deg, loss),
             }
     return {
         'type': 'strategy',
@@ -167,7 +243,10 @@ def strategy_view(state):
         'laps': out_laps,
         'deg': {c: {**v, 'enough': v['n'] >= MIN_LAPS_FOR_ESTIMATE,
                     # 95% ДИ не захватывает ноль — износ статистически заметен
-                    'significant': bool(v['se']) and v['deg'] - 1.96 * v['se'] > 0}
+                    'significant': bool(v['se']) and v['deg'] - 1.96 * v['se'] > 0,
+                    # Круги заметно быстреют: трасса подсыхает / набирает резину
+                    # быстрее, чем изнашиваются шины (типично для дождевой гонки)
+                    'improving': bool(v['se']) and v['deg'] + 1.96 * v['se'] < 0}
                 for c, v in deg.items()},
         'fuel': FUEL,
         'pitLoss': {'value': loss, 'stops': n_stops},

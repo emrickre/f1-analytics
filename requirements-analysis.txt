@@ -1,6 +1,6 @@
-# Анализ деградации шин (analysis/, notebooks/)
+# Tyre degradation analysis (analysis/, notebooks/). Python 3.10+.
 pandas>=2.0
-pyarrow
+pyarrow>=14
 statsmodels>=0.14
-matplotlib
+matplotlib>=3.8
 jupyter

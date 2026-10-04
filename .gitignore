@@ -1,21 +1,21 @@
-# окружение и байткод
+# environment and bytecode
 venv/
 __pycache__/
 *.pyc
+.ipynb_checkpoints/
 
-# кеши данных (FastF1, OpenF1/архив) и сырые записи фида — большие и восстанавливаются
+# data caches (FastF1, OpenF1/archive) and raw feed recordings: large and re-downloadable
 cache/
 live_cache/
 recordings/
 
-# локальное
+# datasets: only the one used by the notebook is committed
+data/*
+!data/laps_2026.parquet
+
+# plots saved by main.py
+/*.png
+
+# local
 .DS_Store
-.claude/settings.local.json
-
-# собранные датасеты (python -m analysis.dataset 2026)
-data/
-
-# настройки ИИ-ассистента — локальные
-CLAUDE.md
-.claude/
-.ipynb_checkpoints/
+.env

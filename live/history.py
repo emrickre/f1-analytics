@@ -10,6 +10,7 @@ import re
 from .util import items
 
 DRY = ('SOFT', 'MEDIUM', 'HARD')
+WET = ('INTERMEDIATE', 'WET')
 
 
 def lap_seconds(v):
