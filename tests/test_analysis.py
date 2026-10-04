@@ -12,6 +12,7 @@ from analysis.clean import clean_laps
 from analysis.dataset import build_session_laps, neutralisations
 from analysis import model as M
 from analysis import strategy as S
+from analysis import undercut as U
 
 T0 = pd.Timestamp('2026-07-05T14:00:00Z')
 
@@ -186,6 +187,50 @@ class StrategyTest(unittest.TestCase):
         loss, n = S.pit_loss(raw, clean)
         self.assertEqual(n, 1)
         self.assertAlmostEqual(loss, 100 + 110 - 2 * 90)
+
+
+def duel_race(sc_lap=None):
+    """Две машины 10 кругов по 90 с: B впереди на 2 с, A заезжает на 4-м круге,
+    B — на 5-м. На свежих шинах A на 1.5 с быстрее; оба стопа по 20 с."""
+    rows = []
+    for num, name, offset, stop in ((1, 'AAA', 2.0, 4), (2, 'BBB', 0.0, 5)):
+        t = offset
+        for lap in range(1, 11):
+            lt = 90.0
+            if lap == stop:
+                lt += 10                      # круг заезда
+            if lap == stop + 1:
+                lt += 10                      # круг выезда
+            if num == 1 and lap > stop:
+                lt -= 1.5                     # свежие шины против старых у B
+            rows.append({'session_key': 1, 'race': 'Test GP', 'driver_number': num, 'driver': name,
+                         'lap_number': lap, 'date_start': T0 + pd.Timedelta(seconds=t), 'lap_time': lt,
+                         'is_in_lap': lap == stop, 'pit_lane_time': 20.0 if lap == stop else np.nan,
+                         'neutralised': 'SC' if lap == sc_lap else None,
+                         'tyre_age': lap if lap <= stop else lap - stop,
+                         'compound': 'MEDIUM' if lap <= stop else 'HARD'})
+            t += lt
+    return pd.DataFrame(rows)
+
+
+class UndercutTest(unittest.TestCase):
+    def test_pair(self):
+        p = U.pit_pairs(duel_race())
+        self.assertEqual(len(p), 1)
+        r = p.iloc[0]
+        self.assertEqual((r['first'], r['second'], r['stop_lap'], r['response_laps']), (1, 2, 4, 1))
+        self.assertAlmostEqual(r['gap_before'], 2.0)
+        # A на свежих шинах на кругах 5 и 6: 2 × 1.5 с
+        self.assertAlmostEqual(r['gain'], 3.0)
+        self.assertTrue(r['overtook'])
+        self.assertEqual((r['second_old'], r['first_new']), ('MEDIUM', 'HARD'))
+        self.assertAlmostEqual(r['pit_lane_diff'], 0.0)
+
+    def test_neutralised_pair_dropped(self):
+        self.assertTrue(U.pit_pairs(duel_race(sc_lap=5)).empty)
+
+    def test_gap_limit(self):
+        self.assertTrue(U.pit_pairs(duel_race(), max_gap=1.0).empty)
 
 
 if __name__ == '__main__':

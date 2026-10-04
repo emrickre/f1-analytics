@@ -75,6 +75,21 @@ python -m analysis.dataset 2026
 
 Tests: `python -m unittest discover tests`
 
+## Second study: the undercut
+
+📓 **[notebooks/undercut.ipynb](notebooks/undercut.ipynb)**: how much does pitting before a rival
+actually gain? Gaps between cars are reconstructed from line-crossing times (checked against
+OpenF1's interval feed: median difference 0.1 s), giving 131 pit-stop pairs in 13 races.
+
+- Pitting first gains **+2.8 s** on average (95 % CI 2.0–3.2 s, bootstrap over races) and gains
+  time in 81 % of pairs.
+- Every lap the rival stays out adds ~0.5 s; every extra second in the pit lane costs ~1.1 s.
+- As an overtaking move it works from within 2 s in ~60 % of cases, from 3–5 s back in only 9 %.
+- The tyre model from the first study predicts the gain only modestly (correlation 0.42): most
+  of the spread is not explained by tyres or pit-lane time (traffic is not in the data).
+
+![An undercut in Kuala Lumpur](docs/undercut_example.png)
+
 ## Also in this repo
 
 - **Live timing web app** ([`live/`](live/README.md)): race replay with timing tower, track
