@@ -15,6 +15,8 @@ function send(obj) {
   if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(obj));
 }
 
+let build = null;       // версия фронтенда с сервера — сменилась → перезагрузка
+
 function connect(delay = 500) {
   ws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`);
   ws.onopen = () => {
@@ -28,7 +30,10 @@ function connect(delay = 500) {
   };
   ws.onmessage = (e) => {
     const m = JSON.parse(e.data);
-    if (m.type === 'state') { state = m; render(); }
+    if (m.type === 'hello') {
+      if (build && build !== m.build) location.reload();
+      build = m.build;
+    } else if (m.type === 'state') { state = m; render(); }
     else if (m.type === 'pos') onPos(m);
     else if (m.type === 'tel') onTel(m);
     else if (m.type === 'outline') { outline = m; fitMap(); }
@@ -318,9 +323,11 @@ function onSessions(m) {
   if (m.year !== Number($('ses-year').value)) return;
   const list = $('ses-list');
   if (!m.items.length) {
-    list.innerHTML = '<option>no data</option>';
+    list.innerHTML = `<option>${m.error && /live/i.test(m.error) ? 'OpenF1 locked during live session' : 'no data'}</option>`;
+    list.title = m.error || '';
     return;
   }
+  list.title = '';
   const groups = [];
   for (const it of m.items) {
     let g = groups.at(-1);
@@ -489,13 +496,15 @@ function drawStints() {
 }
 
 function renderModel() {
-  const order = ['SOFT', 'MEDIUM', 'HARD'];
+  const order = ['SOFT', 'MEDIUM', 'HARD', 'INTERMEDIATE', 'WET'];
   $('m-note').textContent = strat.cleanLaps ? `${strat.cleanLaps} clean laps` : '';
   const rows = order.filter((cpd) => strat.deg[cpd]).map((cpd) => {
     const d = strat.deg[cpd];
     const ci = d.se != null ? ` ± ${(1.96 * d.se).toFixed(3)}` : '';
     const badge = !d.enough ? '<span class="badge">few laps</span>'
-      : d.significant ? '<span class="badge ok">wear</span>' : '<span class="badge">no clear wear</span>';
+      : d.significant ? '<span class="badge ok">wear</span>'
+      : d.improving ? '<span class="badge evo" title="Laps get faster: the track gains grip quicker than the tyres wear">track improving</span>'
+      : '<span class="badge">no clear wear</span>';
     return `<div class="deg-row"><span class="tyre t-${cpd}">${cpd[0]}</span>
       <div><b>${d.deg >= 0 ? '+' : ''}${d.deg.toFixed(3)} s/lap</b><small>${cpd}${ci} · ${d.n} laps</small></div>${badge}</div>`;
   });
@@ -522,10 +531,30 @@ function renderModel() {
     return `<div class="box-opt"><span class="tyre t-${o.compound}">${o.compound[0]}</span>
       <span>${good ? `<b>Box lap ${o.stop_lap}</b> · window ${when}` : '<b>Stay out</b> — no gain from stopping'}</span>
       <span class="gain ${good ? '' : 'neg'}">${good ? '+' : ''}${o.gain.toFixed(1)} s</span></div>`;
-  }).join('') : '<p class="fine">Not enough data on other compounds yet.</p>';
+  }).join('') : `<p class="fine">Not enough data on ${w.wet ? 'wet-weather tyres' : 'other compounds'} yet.</p>`;
+  const fl = w.fastestLap;
+  let flHtml = '';
+  if (fl) {
+    const lapTxt = (v) => v == null ? '—' : `${Math.floor(v / 60)}:${(v % 60).toFixed(3).padStart(6, '0')}`;
+    const when = fl.window[0] === fl.window[1] ? `lap ${fl.window[0]}` : `laps ${fl.window[0]}–${fl.window[1]}`;
+    const gapTxt = fl.lapped ? (fl.behind ? `${esc(fl.behind)} is a lap down` : 'no car behind')
+      : fl.gapBehind != null ? `${fl.gapBehind.toFixed(1)} s to ${esc(fl.behind)}` : 'gap behind unknown';
+    const head = fl.mine ? '<b>Holds fastest lap</b> · stop only to defend it'
+      : fl.status === 'free' ? `<b>Fastest-lap stop</b> · box ${when}`
+      : fl.status === 'tight' ? `<b>Fastest-lap stop?</b> · box ${when}, may lose a place`
+      : '<b>Fastest-lap stop</b> — would lose a place';
+    const need = fl.need == null ? ''
+      : fl.need > 0 ? ` · fresh tyres recover ${fl.recovered.toFixed(1)} s of wear, still ${fl.need.toFixed(1)} s off (+ soft grip)`
+      : ` · fresh tyres recover ${fl.recovered.toFixed(1)} s of wear — enough`;
+    flHtml = `<div class="box-opt fl ${fl.status}"><span class="tyre t-SOFT">S</span>
+      <span>${head}<small>${gapTxt} vs pit loss ${fl.loss.toFixed(1)} s · fastest ${lapTxt(fl.record)}${
+        fl.holder ? ` (${esc(fl.holder)})` : ''} · pace ${lapTxt(fl.pace)}${need}</small></span>
+      <span class="gain ${fl.status === 'free' ? '' : fl.status === 'tight' ? 'warn' : 'neg'}">+1 pt</span></div>`;
+  }
   box.innerHTML = `<h3>${esc(d.tla)}<small>${selected ? '' : 'leader · '}${w.laps_left} laps to go</small></h3>
     <div class="now"><span class="tyre t-${w.compound}">${w.compound[0]}</span> ${w.compound} · ${w.age} laps old</div>
-    ${opts}`;
+    ${opts}${flHtml}${w.wet ? '<p class="fine">Wet race: options cover a fresh set of rain tyres. '
+      + 'The switch to slicks depends on the weather and is not modelled.</p>' : ''}`;
 }
 
 // ---------- плавное движение: интерполяция с задержкой ----------

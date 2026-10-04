@@ -101,6 +101,12 @@ class OpenF1Source:
                 if e.code == 404:          # «No results found»
                     data = []
                     break
+                if e.code == 401:
+                    # Во время live-сессии бесплатный OpenF1 закрыт целиком
+                    # (live — только для спонсоров), даже для прошлых сессий.
+                    raise OpenF1Locked(
+                        'OpenF1 is closed to free users while a session is live — '
+                        'cached sessions still open; the rest after it ends') from None
                 if e.code == 429 and attempt < 7:
                     # Лимит бесплатного доступа (в секунду и в минуту) — ждём.
                     wait = e.headers.get('Retry-After')
@@ -122,10 +128,25 @@ class OpenF1Source:
             if not found:
                 raise SystemExit(f'OpenF1: сессия не найдена по {self.session}')
             return found[-1]
+        # Описание завершённой сессии кешируется рядом с её таблицами (и есть
+        # в сохранённых каталогах): иначе даже сессию из кеша не открыть, пока
+        # OpenF1 закрыт на время live.
+        if str(self.session).isdigit():
+            cache = self.cache_dir / str(self.session) / 'session.json'
+            if cache.exists():
+                return json.loads(cache.read_text())
+            known = _known_session(int(self.session))
+            if known and self._finished(known):
+                return known
         found = self._get('sessions', session_key=self.session)
         if not found:
             raise SystemExit(f'OpenF1: сессия {self.session} не найдена')
-        return found[0]
+        sess = found[0]
+        if self._finished(sess):
+            cache = self.cache_dir / str(sess['session_key']) / 'session.json'
+            cache.parent.mkdir(parents=True, exist_ok=True)
+            cache.write_text(json.dumps(sess))
+        return sess
 
     def load(self):
         sess = self.resolve()
@@ -239,10 +260,12 @@ class OpenF1Source:
                 add(t, 'SessionStatus',
                     {'Status': f'Q{phase} {word}' if phase else word})
 
-        # Пит-стопы (в гонке есть время в пит-лейне). Время `date` у OpenF1
-        # приходится уже на круг выезда, а lap_number — круг заезда, поэтому
-        # «в боксах» ставим с конца круга заезда (= начала следующего круга).
-        # PitOut ставит событие начала круга выезда (is_pit_out_lap) в _laps.
+        # Пит-стопы (в гонке есть время в пит-лейне). `date` у OpenF1 — момент
+        # выезда из пит-лейна (= конец круга заезда + lane_duration), а
+        # lap_number — круг заезда, поэтому «в боксах» ставим с конца круга
+        # заезда (= начала следующего круга) до `date`. Под красным флагом
+        # lane_duration — десятки минут, и лишняя добавка ломала круги после
+        # рестарта. PitOut ставит событие начала круга выезда в _laps.
         lap_start_at = {(str(x['driver_number']), x['lap_number']): ts_of(x['date_start'])
                         for x in d['laps'] if x.get('date_start')}
         stops = {}
@@ -252,8 +275,9 @@ class OpenF1Source:
                 continue
             n = str(p['driver_number'])
             stops[n] = stops.get(n, 0) + 1
-            t_out = ts_of(p['date']) + timedelta(seconds=lane)
-            t_in = lap_start_at.get((n, p.get('lap_number', 0) + 1)) or ts_of(p['date'])
+            t_out = ts_of(p['date'])
+            t_in = (lap_start_at.get((n, p.get('lap_number', 0) + 1))
+                    or t_out - timedelta(seconds=lane))
             add(t_in, 'TimingData', {'Lines': {n: {'InPit': True,
                                                    'NumberOfPitStops': stops[n]}}})
             add(max(t_out, t_in + timedelta(seconds=1)), 'TimingData',
@@ -474,17 +498,51 @@ class OpenF1Source:
         return CarData(rows)
 
 
+class OpenF1Locked(RuntimeError):
+    """HTTP 401: бесплатный доступ закрыт на время live-сессии."""
+
+
 _catalog = {}
 
 
+def _catalog_file(year):
+    return OpenF1Source().cache_dir / f'catalog_{year}.json'
+
+
+def _known_session(key):
+    """Описание сессии из сохранённых каталогов — без запроса к API."""
+    for f in OpenF1Source().cache_dir.glob('catalog_*.json'):
+        try:
+            for s in json.loads(f.read_text())['sessions']:
+                if s['session_key'] == key:
+                    return s
+        except (OSError, ValueError, KeyError):
+            continue
+    return None
+
+
 def catalog(year):
-    """Сессии сезона для выбора в интерфейсе (кеш 10 минут)."""
+    """Сессии сезона для выбора в интерфейсе (кеш 10 минут).
+
+    Последний удачный ответ сохраняется на диск: пока OpenF1 закрыт на время
+    live-сессии (или нет сети), список берётся оттуда.
+    """
     hit = _catalog.get(year)
     if hit and time.time() - hit[0] < 600:
         return hit[1]
-    src = OpenF1Source()
-    sessions = src._get('sessions', year=year)
-    meetings = {m['meeting_key']: m for m in src._get('meetings', year=year)}
+    src, disk = OpenF1Source(), _catalog_file(year)
+    try:
+        sessions = src._get('sessions', year=year)
+        meetings = src._get('meetings', year=year)
+        disk.parent.mkdir(parents=True, exist_ok=True)
+        disk.write_text(json.dumps({'sessions': sessions, 'meetings': meetings}))
+    except (OpenF1Locked, urllib.error.URLError, OSError):
+        if not disk.exists():
+            raise
+        saved = json.loads(disk.read_text())
+        sessions, meetings = saved['sessions'], saved['meetings']
+        log.info('catalog %s: OpenF1 недоступен, список с диска', year)
+    meetings = {m['meeting_key']: m for m in meetings}
     now = datetime.now(timezone.utc)
     items = []
     for s in sorted(sessions, key=lambda s: s['date_start']):

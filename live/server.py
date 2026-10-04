@@ -10,6 +10,7 @@
                                                      — сэмплы координат, 10 Гц
     {'type': 'sessions', 'year': int, 'items': [...]} — каталог OpenF1
     {'type': 'strategy', ...strategy_view()}          — история кругов и модель шин
+    {'type': 'hello', 'build': str}                    — версия фронтенда (при подключении)
 
 Браузер → сервер:
     {'cmd': 'play' | 'pause' | 'toggle'}
@@ -45,6 +46,12 @@ log = logging.getLogger('live.server')
 STATIC = Path(__file__).parent / 'static'
 TICK = 0.25
 POS_TICK = 0.1
+
+
+def frontend_build():
+    """Версия фронтенда — по времени изменения файлов static/. Вкладка, открытая
+    до перезапуска сервера, сравнивает её при переподключении и перезагружается."""
+    return str(max(int(f.stat().st_mtime) for f in STATIC.iterdir() if f.is_file()))
 
 
 def dumps(obj):
@@ -198,12 +205,14 @@ class LiveServer:
                 p.seek(p.pos + float(msg.get('dt', 0)))
         elif cmd == 'sessions':
             year = int(msg.get('year') or datetime.now().year)
+            error = None
             try:
                 items = await asyncio.to_thread(openf1.catalog, year)
             except Exception as e:
                 log.warning('catalog %s: %s', year, e)
-                items = []
-            await ws.send(dumps({'type': 'sessions', 'year': year, 'items': items}))
+                items, error = [], str(e)
+            await ws.send(dumps({'type': 'sessions', 'year': year, 'items': items,
+                                 'error': error}))
         elif cmd == 'focus':
             num = msg.get('driver')
             self.focus[ws] = str(num) if num else None
@@ -334,6 +343,7 @@ class LiveServer:
     async def ws_handler(self, ws):
         self.clients.add(ws)
         try:
+            await ws.send(dumps({'type': 'hello', 'build': frontend_build()}))
             await ws.send(self._outline_msg())
             await ws.send(self._state_msg())
             await ws.send(dumps({'type': 'playback', **self.playback()}))
