@@ -12,6 +12,7 @@ recordings/
 # datasets: only the one used by the notebook is committed
 data/*
 !data/laps_2026.parquet
+!data/laps_2026_practice.parquet
 
 # plots saved by main.py
 figures/

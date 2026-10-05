@@ -40,6 +40,8 @@ times, tyre compound and age, pit stops, Safety Car / VSC / flags, track tempera
 the same license (see [License](#license)). OpenF1's stint table does not always match its pit
 stops (shifted by a lap in some races, missing stops in others), so tyre stints are rebuilt from the
 pit stops, with each stop lap checked against the pit-exit time.
+Practice and sprint laps of the same weekends (21,776 laps from 43 sessions) are in
+[`data/laps_2026_practice.parquet`](data/laps_2026_practice.parquet).
 
 ## Method
 
@@ -74,6 +76,7 @@ the API (about 3 min; OpenF1 is closed to free users while a session is live):
 
 ```bash
 python -m analysis.dataset 2026
+python -m analysis.dataset 2026 --session practice   # FP1–FP3 and sprints
 ```
 
 Tests: `python -m unittest discover tests`
@@ -110,6 +113,16 @@ that combines the per-track wear model with a Safety Car / VSC model fitted on t
   drivers in 9 of 11 dry races.
 
 ![Two-stop vs one-stop under Safety Car risk, Barcelona](docs/strategy_sc.png)
+
+**Planning from practice.** The simulator above knows each race's tyre wear in hindsight. Before the
+start a strategist only has free practice and the sprint, so the same notebook estimates wear from
+442 practice long runs. Raw practice wear tracks the race (r = 0.59) but runs high and noisy. Shrunk
+towards the season median (empirical Bayes, leave-one-race-out), it forecasts race wear 14 % better
+than the season median alone. It also gives a better pre-race plan in 8 of 12 races: the median time
+lost against a hindsight plan falls from 12.7 s to 4.7 s. Monaco is the exception: three FP1 runs on
+a green track mistook track grip for tyre life.
+
+![Tyre wear in practice vs the race, and the pre-race plan](docs/practice_plan.png)
 
 ## Also in this repo
 
