@@ -17,7 +17,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from live.openf1 import OpenF1Source, catalog
+from live.openf1 import OpenF1Source, catalog, normalize_pits, reconcile_stints
 
 log = logging.getLogger('analysis.dataset')
 
@@ -79,6 +79,7 @@ def build_session_laps(raw, meta=None):
     laps = pd.DataFrame(raw['laps'])
     if laps.empty:
         return laps
+    raw = {**raw, 'pit': normalize_pits(raw['pit'], raw['laps'])}
     laps = laps[['session_key', 'driver_number', 'lap_number', 'date_start',
                  'lap_duration', 'duration_sector_1', 'duration_sector_2',
                  'duration_sector_3', 'is_pit_out_lap', 'st_speed']].copy()
@@ -99,7 +100,8 @@ def build_session_laps(raw, meta=None):
     stint_no = np.full(len(laps), np.nan)
     age = np.full(len(laps), np.nan)
     stints = {}
-    for s in raw['stints']:
+    # Стинты OpenF1 сверяются с пит-стопами (см. live.openf1.reconcile_stints)
+    for s in reconcile_stints(raw['stints'], raw['pit'], raw['laps']):
         stints.setdefault(s['driver_number'], []).append(s)
     for i, (n, lap) in enumerate(zip(laps['driver_number'], laps['lap_number'])):
         for s in stints.get(n, ()):

@@ -14,6 +14,7 @@ import bisect
 import json
 import logging
 import math
+import re
 import time
 import urllib.error
 import urllib.parse
@@ -46,6 +47,111 @@ def fmt_gap(v):
     if isinstance(v, str):          # "+1 LAP" и т.п.
         return v.replace(' LAP', ' L').lstrip('+') if 'LAP' in v else v
     return f'+{v:.3f}' if v else ''  # 0 — это сам лидер
+
+
+def meeting_title(meeting, fallback=''):
+    """Название этапа. Перенесённый этап сохраняет имя, а место видно только в
+    официальном названии: «… BAHRAIN GRAND PRIX IN MALAYSIA 2026» →
+    «Bahrain Grand Prix in Malaysia»."""
+    name = meeting.get('meeting_name') or fallback
+    m = re.search(r'GRAND PRIX IN ([A-Z][A-Z ]*?)\s+\d{4}\s*$', meeting.get('meeting_official_name') or '')
+    return f'{name} in {m.group(1).title()}' if name and m else name
+
+
+def normalize_pits(pit, laps):
+    """Пит-стопы с номером круга заезда, проверенным по времени.
+
+    `date` у OpenF1 — момент выезда из пит-лейна, он приходится на круг выезда,
+    значит круг заезда — предыдущий. Обычно это и есть lap_number, но в отдельных
+    гонках (Австралия 2026) lap_number записан на круг позже. Если время выезда
+    не удаётся привязать к кругу, остаётся исходный lap_number.
+    """
+    start = {}
+    for x in laps:
+        if x.get('date_start'):
+            start.setdefault(x['driver_number'], []).append((x['lap_number'], ts_of(x['date_start'])))
+    for v in start.values():
+        v.sort()
+    out = []
+    for p in pit:
+        q = dict(p)
+        t, rows = ts_of(p.get('date')), start.get(p.get('driver_number'), [])
+        if t is not None and rows:
+            k = bisect.bisect_right([s for _, s in rows], t) - 1      # круг, в котором выезд
+            if 0 < k < len(rows):                                    # не первый и не последний
+                q['lap_number'] = rows[k][0] - 1
+        out.append(q)
+    return out
+
+
+def reconcile_stints(stints, pit, laps):
+    """Стинты OpenF1, сверенные с пит-стопами.
+
+    Таблица стинтов OpenF1 бывает несогласована с остальными: в одних гонках новый
+    стинт начинается на круге заезда (сдвиг на круг), в других стоп вообще не
+    превращается в новый стинт, а лишние границы появляются без стопа. Поэтому
+    границы берутся из пит-стопов (таблица pit и флаг круга выезда в laps) плюс
+    смены состава, которым не нашлось стопа (например, смена шин под красным
+    флагом). Состав — из OpenF1 по второму кругу стинта (устойчиво к сдвигу),
+    возраст на старте — из совпавшего стинта OpenF1, иначе 0 и inferred=True.
+    """
+    by = {}
+    for s in stints:
+        if s.get('lap_start'):
+            by.setdefault(s['driver_number'], []).append(s)
+    stops, out_laps, last = {}, {}, {}
+    for p in pit:                         # pit уже нормализован (normalize_pits)
+        if p.get('lap_number'):
+            stops.setdefault(p['driver_number'], set()).add(p['lap_number'])
+    for x in laps:
+        n = x['driver_number']
+        last[n] = max(last.get(n, 0), x['lap_number'])
+        if x.get('is_pit_out_lap') and x['lap_number'] > 1:
+            out_laps.setdefault(n, set()).add(x['lap_number'] - 1)
+    for n, xs in out_laps.items():        # флаг выезда — только если стопа рядом нет
+        st = stops.setdefault(n, set())
+        st |= {x for x in xs if not any(abs(x - y) <= 1 for y in st)}
+
+    out = []
+    for n, ss in by.items():
+        ss.sort(key=lambda s: (s['stint_number'], s['lap_start']))
+        end = max(last.get(n, 0), max((s.get('lap_end') or s['lap_start']) for s in ss))
+        st = set(stops.get(n, ()))
+        # Каждая смена состава в OpenF1 должна объясняться своим стопом: сначала
+        # стоп ровно на её круге, затем соседний (стинты бывают сдвинуты на круг).
+        # Один стоп объясняет одну смену; смене без стопа добавляется граница
+        # (смена шин под красным флагом и т.п.).
+        changes = [cur['lap_start'] - 1 for prev, cur in zip(ss, ss[1:])
+                   if cur.get('compound') != prev.get('compound')]
+        used, pending = set(), []
+        for b in changes:
+            if b in st and b not in used:
+                used.add(b)
+            else:
+                pending.append(b)
+        for b in pending:
+            near = sorted((abs(x - b), x) for x in st - used if abs(x - b) <= 1)
+            if near:
+                used.add(near[0][1])
+            else:
+                st.add(b)
+                used.add(b)
+        starts = sorted({1} | {x + 1 for x in st if 1 <= x < end})
+
+        def covering(lap):
+            return next((s for s in ss if s['lap_start'] <= lap <= (s.get('lap_end') or end)), None)
+
+        compound = None
+        for i, a in enumerate(starts):
+            b = starts[i + 1] - 1 if i + 1 < len(starts) else end
+            src = covering(min(a + 1, b)) or covering(a)
+            compound = (src or {}).get('compound') or compound or 'UNKNOWN'
+            match = next((s for s in ss if abs(s['lap_start'] - a) <= 1), None)
+            out.append({'driver_number': n, 'stint_number': i + 1, 'lap_start': a, 'lap_end': b,
+                        'compound': compound,
+                        'tyre_age_at_start': (match or {}).get('tyre_age_at_start') or 0,
+                        'inferred': match is None})
+    return out
 
 
 class CarData:
@@ -167,6 +273,8 @@ class OpenF1Source:
             self.on_progress(f'tables: {ep}')
             d[ep] = self._get(ep, c(ep), session_key=key)
             log.info('  %-13s %6d', ep, len(d[ep]))
+        d['pit'] = normalize_pits(d['pit'], d['laps'])
+        d['stints'] = reconcile_stints(d['stints'], d['pit'], d['laps'])
 
         start = ts_of(sess['date_start']) - timedelta(minutes=2)
         stop = end + timedelta(minutes=2)
@@ -199,7 +307,7 @@ class OpenF1Source:
         drivers = {str(x['driver_number']): x for x in d['drivers']}
         t0 = t_start - timedelta(minutes=3)
         add(t0, 'SessionInfo', {
-            'Meeting': {'Name': meeting.get('meeting_name') or sess.get('location'),
+            'Meeting': {'Name': meeting_title(meeting, sess.get('location')),
                         'Circuit': {'Key': sess.get('circuit_key'),
                                     'ShortName': sess.get('circuit_short_name')}},
             'Name': sess['session_name'], 'Type': sess['session_type'],
@@ -310,16 +418,6 @@ class OpenF1Source:
                     return s
             return None
 
-        # Смена шин — в момент начала первого круга стинта.
-        for n, ss in stints.items():
-            for s in ss:
-                t = lap_start.get((n, s['lap_start'])) or t_start
-                age = s.get('tyre_age_at_start') or 0
-                ev.append((t, 'TimingAppData', {'Lines': {n: {'Stints': {
-                    str(s['stint_number'] - 1): {
-                        'Compound': s.get('compound') or 'UNKNOWN',
-                        'New': 'true' if age == 0 else 'false', 'TotalLaps': age}}}}}))
-
         # Сырые отметки: (t, n, kind, payload) — потом проходим по порядку.
         raw = []
         prev_end = {}
@@ -354,6 +452,25 @@ class OpenF1Source:
             elif acc:
                 raw.append((t + timedelta(seconds=acc), n, 'lap', (lap, None)))
         raw.sort(key=lambda r: r[0])
+
+        # Смена шин — в момент начала первого круга стинта, но строго после
+        # записи предыдущего круга: иначе круг заезда (и 1-й круг) попал бы в
+        # историю уже с новыми шинами. На решётке — с начала ленты.
+        lap_done = {(n, x[0]): t for t, n, kind, x in raw if kind == 'lap'}
+        for n, ss in stints.items():
+            for s in ss:
+                t = lap_start.get((n, s['lap_start'])) or t_start
+                if s['lap_start'] == 1:
+                    t = min(t, t_start - timedelta(minutes=3))
+                else:
+                    done = lap_done.get((n, s['lap_start'] - 1))
+                    if done is not None and done >= t:
+                        t = done + timedelta(milliseconds=1)
+                age = s.get('tyre_age_at_start') or 0
+                ev.append((t, 'TimingAppData', {'Lines': {n: {'Stints': {
+                    str(s['stint_number'] - 1): {
+                        'Compound': s.get('compound') or 'UNKNOWN',
+                        'New': 'true' if age == 0 else 'false', 'TotalLaps': age}}}}}))
 
         total_laps = max((x['lap_number'] for x in d['laps']), default=None)
         best_sec, best_lap = {}, {}
@@ -477,7 +594,7 @@ class OpenF1Source:
         base = ev[0][0]
         msgs = [((t - base).total_seconds(), {'kind': 'msg', 'topic': topic, 'data': data})
                 for t, topic, data in ev]
-        title = f"{sess['year']} {meeting.get('meeting_name') or sess['location']} — " \
+        title = f"{sess['year']} {meeting_title(meeting, sess['location'])} — " \
                 f"{sess['session_name']}"
         log.info('OpenF1: %s, %d событий', title, len(msgs))
         return Timeline(msgs=msgs, base=base,
@@ -549,7 +666,7 @@ def catalog(year):
         m = meetings.get(s['meeting_key'], {})
         items.append({
             'key': s['session_key'],
-            'meeting': m.get('meeting_name') or s.get('location'),
+            'meeting': meeting_title(m, s.get('location')),
             'location': s.get('location'),
             'name': s['session_name'],
             'start': s['date_start'],
