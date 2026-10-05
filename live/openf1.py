@@ -418,19 +418,6 @@ class OpenF1Source:
                     return s
             return None
 
-        # Смена шин — в момент начала первого круга стинта.
-        for n, ss in stints.items():
-            for s in ss:
-                t = lap_start.get((n, s['lap_start'])) or t_start
-                if s['lap_start'] == 1:
-                    # шины видны уже на решётке: с начала ленты, вместе с SessionInfo
-                    t = min(t, t_start - timedelta(minutes=3))
-                age = s.get('tyre_age_at_start') or 0
-                ev.append((t, 'TimingAppData', {'Lines': {n: {'Stints': {
-                    str(s['stint_number'] - 1): {
-                        'Compound': s.get('compound') or 'UNKNOWN',
-                        'New': 'true' if age == 0 else 'false', 'TotalLaps': age}}}}}))
-
         # Сырые отметки: (t, n, kind, payload) — потом проходим по порядку.
         raw = []
         prev_end = {}
@@ -465,6 +452,25 @@ class OpenF1Source:
             elif acc:
                 raw.append((t + timedelta(seconds=acc), n, 'lap', (lap, None)))
         raw.sort(key=lambda r: r[0])
+
+        # Смена шин — в момент начала первого круга стинта, но строго после
+        # записи предыдущего круга: иначе круг заезда (и 1-й круг) попал бы в
+        # историю уже с новыми шинами. На решётке — с начала ленты.
+        lap_done = {(n, x[0]): t for t, n, kind, x in raw if kind == 'lap'}
+        for n, ss in stints.items():
+            for s in ss:
+                t = lap_start.get((n, s['lap_start'])) or t_start
+                if s['lap_start'] == 1:
+                    t = min(t, t_start - timedelta(minutes=3))
+                else:
+                    done = lap_done.get((n, s['lap_start'] - 1))
+                    if done is not None and done >= t:
+                        t = done + timedelta(milliseconds=1)
+                age = s.get('tyre_age_at_start') or 0
+                ev.append((t, 'TimingAppData', {'Lines': {n: {'Stints': {
+                    str(s['stint_number'] - 1): {
+                        'Compound': s.get('compound') or 'UNKNOWN',
+                        'New': 'true' if age == 0 else 'false', 'TotalLaps': age}}}}}))
 
         total_laps = max((x['lap_number'] for x in d['laps']), default=None)
         best_sec, best_lap = {}, {}
