@@ -10,20 +10,20 @@ or on the track, and when is the optimal moment to pit?
 ## Key findings
 
 - **Degradation is a property of the track, not of the compound.** Fitted race by race,
-  degradation ranges from −0.013 to 0.115 s/lap between tracks. Within the same race the median
-  SOFT − MEDIUM difference is only −0.008 s/lap, and the soft wears faster in just 5 of 13 races.
+  degradation ranges from −0.013 to 0.150 s/lap between tracks. Within the same race the median
+  SOFT − MEDIUM difference is only −0.006 s/lap, and the soft wears faster in just 6 of 13 races.
 - **Simpson's paradox in the naive model.** A season-wide mixed model says SOFT wears slower
-  than MEDIUM (0.013 vs 0.032 s/lap). The reason is that teams run softs mostly on low-wear tracks.
+  than MEDIUM (0.024 vs 0.033 s/lap). The reason is that teams run softs mostly on low-wear tracks.
 - **What a strategist can predict.** After 3 laps of a stint, estimating degradation from the
-  *other drivers in the same race* cuts the lap-time forecast error by **20 %** (MAE 0.78 s vs
-  0.97 s for a flat-pace baseline). A season-average model gains only 2 %. The track model wins
-  in 12 of 16 races.
-- **Belgian GP case.** The model's optimal one-stop lap (16, window 12–21) matches the laps the
+  *other drivers in the same race* cuts the lap-time forecast error by **20 %** (MAE 0.76 s vs
+  0.96 s for a flat-pace baseline). A season-average model gains only 1 %. The track model wins
+  in 11 of 16 races.
+- **Belgian GP case.** The model's optimal one-stop lap (16, window 12–20) matches the laps the
   teams actually chose (14–17).
 - **Beyond a linear model.** A track-specific quadratic wear curve cuts the forecast error further,
-  to **24 %** (MAE 0.73 s). Separating track evolution (the track typically gets 0.01 s/lap faster)
-  removes most of the impossible negative-wear estimates, but it does not make the pit-window
-  choice more reliable, so strategy keeps the simpler model.
+  to **24 %** (MAE 0.72 s). Separating track evolution (the track typically gets 0.01 s/lap faster)
+  changes how wear is read on some tracks, but it neither improves the forecast nor makes the
+  pit-window choice more reliable, so strategy keeps the simpler model.
 
 ![Degradation by race and compound](docs/degradation_by_track.png)
 
@@ -35,9 +35,11 @@ or on the track, and when is the optimal moment to pit?
 
 Every race lap of the 2026 season from the [OpenF1](https://openf1.org) API: lap and sector
 times, tyre compound and age, pit stops, Safety Car / VSC / flags, track temperature.
-18,405 laps from 16 races, 14,263 after cleaning. The dataset is included in
+18,405 laps from 16 races, 14,274 after cleaning. The dataset is included in
 [`data/laps_2026.parquet`](data/laps_2026.parquet); it is derived from OpenF1 data and shared under
-the same license (see [License](#license)).
+the same license (see [License](#license)). OpenF1's stint table does not always match its pit
+stops (shifted by a lap in some races, missing stops in others), so tyre stints are rebuilt from the
+pit stops, with each stop lap checked against the pit-exit time.
 
 ## Method
 
@@ -80,14 +82,15 @@ Tests: `python -m unittest discover tests`
 
 📓 **[notebooks/undercut.ipynb](notebooks/undercut.ipynb)**: how much does pitting before a rival
 actually gain? Gaps between cars are reconstructed from line-crossing times (checked against
-OpenF1's interval feed: median difference 0.1 s), giving 131 pit-stop pairs in 13 races.
+OpenF1's interval feed: median difference 0.1 s), giving 132 pit-stop pairs in 14 races.
 
-- Pitting first gains **+2.8 s** on average (95 % CI 2.0–3.2 s, bootstrap over races) and gains
+- Pitting first gains **+2.8 s** on average (95 % CI 2.1–3.2 s, bootstrap over races) and gains
   time in 81 % of pairs.
-- Every lap the rival stays out adds ~0.5 s; every extra second in the pit lane costs ~1.1 s.
+- **Track degradation drives it**: 0.1 s/lap more wear makes the undercut worth ~2.7 s more.
+  Every lap the rival stays out adds ~0.5 s; every extra second in the pit lane costs ~1.3 s.
 - As an overtaking move it works from within 2 s in ~60 % of cases, from 3–5 s back in only 9 %.
-- The tyre model from the first study predicts the gain only modestly (correlation 0.42): most
-  of the spread is not explained by tyres or pit-lane time (traffic is not in the data).
+- The tyre model from the first study predicts the gain without bias but only roughly
+  (correlation 0.48): traffic and driver effects are not in the data.
 
 ![An undercut in Kuala Lumpur](docs/undercut_example.png)
 

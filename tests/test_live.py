@@ -6,7 +6,8 @@ import unittest
 from datetime import datetime, timedelta, timezone
 
 from live.decode import decode_z, encode_z
-from live.openf1 import CarData, OpenF1Source, compact_locations
+from live.openf1 import (CarData, OpenF1Source, compact_locations, meeting_title,
+                         normalize_pits, reconcile_stints)
 from live.player import Player, Timeline
 from live.server import LiveServer
 from live.sim import SimSource
@@ -438,6 +439,72 @@ class OpenF1LockedTest(unittest.TestCase):
         self.assertEqual(len(self.calls), n)                             # без сети
         with self.assertRaises(O.OpenF1Locked):
             O.OpenF1Source('latest').resolve()
+
+
+class OpenF1CleanupTest(unittest.TestCase):
+    """Несогласованные таблицы OpenF1: пит-стопы, стинты, названия этапов."""
+
+    T = staticmethod(lambda s: (datetime(2026, 10, 4, 7, tzinfo=timezone.utc)
+                                + timedelta(seconds=s)).isoformat())
+
+    def laps(self, n=12, out_laps=()):
+        return [{'driver_number': 3, 'lap_number': i, 'date_start': self.T((i - 1) * 100),
+                 'is_pit_out_lap': i in out_laps} for i in range(1, n + 1)]
+
+    def test_pit_lap_from_exit_time(self):
+        laps = self.laps()
+        # выезд на 50-й секунде 6-го круга → заезд на 5-м, хотя записано 6
+        pit = normalize_pits([{'driver_number': 3, 'lap_number': 6, 'date': self.T(550)}], laps)
+        self.assertEqual(pit[0]['lap_number'], 5)
+
+    def test_stints_follow_pit_stops(self):
+        laps = self.laps(out_laps={6})
+        pit = normalize_pits([{'driver_number': 3, 'lap_number': 5, 'date': self.T(520)},
+                              {'driver_number': 3, 'lap_number': 9, 'date': self.T(920)}], laps)
+        stints = [  # интеры на 1-м круге без записи о стопе; лишняя граница на 3-м;
+                    # стоп на 9-м круге в стинты не попал
+            {'driver_number': 3, 'stint_number': 1, 'lap_start': 1, 'lap_end': 1,
+             'compound': 'INTERMEDIATE', 'tyre_age_at_start': 0},
+            {'driver_number': 3, 'stint_number': 2, 'lap_start': 2, 'lap_end': 2,
+             'compound': 'SOFT', 'tyre_age_at_start': 0},
+            {'driver_number': 3, 'stint_number': 3, 'lap_start': 3, 'lap_end': 5,
+             'compound': 'SOFT', 'tyre_age_at_start': 0},
+            {'driver_number': 3, 'stint_number': 4, 'lap_start': 6, 'lap_end': 12,
+             'compound': 'HARD', 'tyre_age_at_start': 2}]
+        r = reconcile_stints(stints, pit, laps)
+        self.assertEqual([(s['lap_start'], s['lap_end'], s['compound']) for s in r],
+                         [(1, 1, 'INTERMEDIATE'), (2, 5, 'SOFT'), (6, 9, 'HARD'), (10, 12, 'HARD')])
+        self.assertEqual([s['tyre_age_at_start'] for s in r], [0, 0, 2, 0])
+        self.assertEqual([s['inferred'] for s in r], [False, False, False, True])
+
+    def test_one_stop_explains_one_compound_change(self):
+        # MEDIUM на 1-м круге, интеры на 2-м (смена без стопа), стоп на 2-м → HARD
+        laps = self.laps(out_laps={3})
+        pit = normalize_pits([{'driver_number': 3, 'lap_number': 2, 'date': self.T(220)}], laps)
+        stints = [{'driver_number': 3, 'stint_number': 1, 'lap_start': 1, 'lap_end': 1, 'compound': 'MEDIUM'},
+                  {'driver_number': 3, 'stint_number': 2, 'lap_start': 2, 'lap_end': 2, 'compound': 'INTERMEDIATE'},
+                  {'driver_number': 3, 'stint_number': 3, 'lap_start': 3, 'lap_end': 12, 'compound': 'HARD'}]
+        r = reconcile_stints(stints, pit, laps)
+        self.assertEqual([(s['lap_start'], s['compound']) for s in r],
+                         [(1, 'MEDIUM'), (2, 'INTERMEDIATE'), (3, 'HARD')])
+
+    def test_stints_shifted_by_a_lap(self):
+        # стинт начинается на круге заезда (Канада, Монако 2026)
+        laps = self.laps(out_laps={6})
+        pit = normalize_pits([{'driver_number': 3, 'lap_number': 5, 'date': self.T(520)}], laps)
+        stints = [{'driver_number': 3, 'stint_number': 1, 'lap_start': 1, 'lap_end': 4, 'compound': 'MEDIUM'},
+                  {'driver_number': 3, 'stint_number': 2, 'lap_start': 5, 'lap_end': 12, 'compound': 'HARD'}]
+        r = reconcile_stints(stints, pit, laps)
+        self.assertEqual([(s['lap_start'], s['compound']) for s in r], [(1, 'MEDIUM'), (6, 'HARD')])
+
+    def test_meeting_title(self):
+        self.assertEqual(meeting_title({'meeting_name': 'Bahrain Grand Prix',
+                                        'meeting_official_name': 'FORMULA 1 GULF AIR BAHRAIN GRAND PRIX IN MALAYSIA 2026'}),
+                         'Bahrain Grand Prix in Malaysia')
+        self.assertEqual(meeting_title({'meeting_name': 'British Grand Prix',
+                                        'meeting_official_name': 'FORMULA 1 QATAR AIRWAYS BRITISH GRAND PRIX 2026'}),
+                         'British Grand Prix')
+        self.assertEqual(meeting_title({}, 'Monza'), 'Monza')
 
 
 class PlayerTest(unittest.TestCase):

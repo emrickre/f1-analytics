@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 import numpy as np
 import pandas as pd
 
-from live.openf1 import OpenF1Source, catalog
+from live.openf1 import OpenF1Source, catalog, normalize_pits, reconcile_stints
 
 SESSION_TYPES = ['R', 'Q', 'S', 'SQ', 'FP1', 'FP2', 'FP3']
 SESSION_NAMES = {'R': 'Race', 'Q': 'Qualifying', 'S': 'Sprint',
@@ -137,6 +137,7 @@ def get_session(year, gp, session_type, src=None):
 
 def build_session(raw, key, year, event, name, finished=True, src=None):
     """OpenF1 tables → Session (pure function, no network)."""
+    raw = {**raw, 'pit': normalize_pits(raw.get('pit', []), raw['laps'])}
     drivers = {}
     for d in raw['drivers']:
         code = d.get('name_acronym') or str(d['driver_number'])
@@ -165,7 +166,7 @@ def build_session(raw, key, year, event, name, finished=True, src=None):
         'Compound': (s.get('compound') or 'UNKNOWN').upper(),
         'LapStart': s['lap_start'], 'LapEnd': s.get('lap_end') or s['lap_start'],
         'TyreAgeAtStart': s.get('tyre_age_at_start') or 0,
-    } for s in raw['stints'] if s.get('lap_start')],
+    } for s in reconcile_stints(raw['stints'], raw.get('pit', []), raw['laps']) if s.get('lap_start')],
         columns=['Driver', 'Stint', 'Compound', 'LapStart', 'LapEnd', 'TyreAgeAtStart'])
     laps['Stint'], laps['Compound'], laps['TyreLife'] = np.nan, None, np.nan
     for st in stints.itertuples():

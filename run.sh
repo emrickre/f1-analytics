@@ -11,6 +11,13 @@ for ((i = 0; i < ${#args[@]}; i++)); do
 done
 [[ ${#args[@]} -eq 0 ]] && args=(--speed 4 openf1)
 
+# macOS: при огромном лимите открытых файлов (ulimit -n ≈ 10^6, так бывает во
+# встроенных терминалах) сетевые вызовы Python падают с «Too many open files».
+limit=$(ulimit -n)
+if [[ $limit == unlimited || $limit -gt 10240 ]]; then
+  ulimit -n 10240 2>/dev/null
+fi
+
 if pids=$(lsof -ti tcp:"$PORT" -sTCP:LISTEN 2>/dev/null) && [[ -n $pids ]]; then
   echo "останавливаю прежний сервер на порту $PORT (pid $pids)"
   kill $pids
