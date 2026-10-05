@@ -13,6 +13,7 @@ from analysis.dataset import build_session_laps, neutralisations
 from analysis import model as M
 from analysis import strategy as S
 from analysis import undercut as U
+from analysis import simulate as X
 
 T0 = pd.Timestamp('2026-07-05T14:00:00Z')
 
@@ -231,6 +232,47 @@ class UndercutTest(unittest.TestCase):
 
     def test_gap_limit(self):
         self.assertTrue(U.pit_pairs(duel_race(), max_gap=1.0).empty)
+
+
+class SimulateTest(unittest.TestCase):
+    params = {'offset': {'MEDIUM': 0.0, 'HARD': 0.3}, 'deg': {'MEDIUM': 0.10, 'HARD': 0.05}}
+
+    def test_events_from_laps(self):
+        rows = [{'race': 'R', 'total_laps': 10, 'lap_number': l, 'driver_number': d,
+                 'neutralised': 'SC' if 3 <= l <= 5 else ('VSC' if l == 8 else None)}
+                for l in range(1, 11) for d in (1, 2)]
+        ev = X.neutralisation_events(pd.DataFrame(rows))
+        self.assertEqual(ev[['kind', 'start', 'end', 'laps']].values.tolist(),
+                         [['SC', 3, 5, 3], ['VSC', 8, 8, 1]])
+
+    def test_scenarios_rate(self):
+        model = {'p': 0.05, 'share_sc': 0.5, 'durations': {'SC': np.array([3]), 'VSC': np.array([2])}}
+        sc = X.sample_scenarios(model, 60, 3000, seed=0)
+        starts = ((sc[:, 1:] != 0) & (sc[:, :-1] == 0)).sum(1) + (sc[:, 0] != 0)
+        # ~ 0.05 на «зелёный» круг: при средней длине 2.5 круга ≈ 2.6 эпизода на 60 кругов
+        self.assertAlmostEqual(starts.mean(), 60 / (1 / 0.05 + 2.5), delta=0.25)
+        self.assertTrue(set(np.unique(sc)) <= {0, 1, 2})
+
+    def test_no_neutralisation_equals_deterministic(self):
+        one, two, det = X.best_plans(self.params, 50, loss=20.0)
+        green = np.zeros((3, 50), dtype=np.int8)
+        ratio = {'GREEN': 1.0, 'SC': 0.5, 'VSC': 0.8}
+        for plan in (one, two):
+            for pol in ('fixed', 'react'):
+                t = X.race_times(self.params, 50, plan, green, 20.0, ratio, policy=pol)
+                self.assertTrue(np.allclose(t, det[plan]))
+
+    def test_react_takes_cheap_stop_under_sc(self):
+        plan = X.Plan('MEDIUM', ((20, 'HARD'),))
+        scen = np.zeros(50, dtype=np.int8)
+        scen[17:21] = 1                       # SC с 18-го круга, стоп запланирован на 20-м
+        cost = np.array([20.0, 10.0, 16.0])
+        stops = X.react(plan, scen, 50, self.params, cost, {1: 4, 2: 3})
+        self.assertEqual(stops, ((20, 'HARD'),))   # стоп и так под SC — ничего не меняем
+        scen = np.zeros(50, dtype=np.int8)
+        scen[13:17] = 1                       # SC с 14-го: перенести стоп выгоднее
+        stops = X.react(plan, scen, 50, self.params, cost, {1: 4, 2: 3})
+        self.assertEqual(stops[0][0], 14)
 
 
 if __name__ == '__main__':

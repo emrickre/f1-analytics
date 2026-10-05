@@ -94,6 +94,23 @@ OpenF1's interval feed: median difference 0.1 s), giving 132 pit-stop pairs in 1
 
 ![An undercut in Kuala Lumpur](docs/undercut_example.png)
 
+## Third study: strategy under Safety Car risk
+
+📓 **[notebooks/strategy_sim.ipynb](notebooks/strategy_sim.ipynb)**: a Monte Carlo race simulator
+that combines the per-track wear model with a Safety Car / VSC model fitted on the season.
+
+- Every 2026 race had a neutralisation: 2.0 per race on average, 31 % of them full Safety Cars.
+  A stop costs ~50 % of its usual price under a Safety Car and ~84 % under a VSC.
+- Safety Car risk shrinks the advantage of a two-stop by a median 44 % where it clearly wins
+  (Barcelona: 27.0 s → 15.1 s): fresh tyres gain nothing on neutralised laps, and a one-stopper can
+  take a cheap extra stop.
+- Reacting to a neutralisation (moving a stop or adding one when it pays) is worth 1.3 s per race
+  on average, up to 5 s on high-wear tracks.
+- Replaying each race's real Safety Car periods, the model makes the same number of stops as most
+  drivers in 9 of 11 dry races.
+
+![Two-stop vs one-stop under Safety Car risk, Barcelona](docs/strategy_sc.png)
+
 ## Also in this repo
 
 - **Live timing web app** ([`live/`](live/README.md)): race replay with timing tower, track
