@@ -70,7 +70,7 @@ def neutral_pit_ratio(laps, max_lane_excess=5.0):
     rows = []
     for race, r in laps.groupby('race', sort=False):
         t = r.pivot_table(index='lap_number', columns='driver_number', values='lap_time')
-        busy = (r.assign(b=r['is_in_lap'] | r['is_pit_out_lap'])
+        busy = (r.assign(b=(r['is_in_lap'] | r['is_pit_out_lap']).astype(int))
                  .pivot_table(index='lap_number', columns='driver_number', values='b', aggfunc='max')
                  .reindex_like(t).fillna(0).astype(bool))
         kind = r.groupby('lap_number')['neutralised'].agg(

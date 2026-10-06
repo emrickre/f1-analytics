@@ -44,6 +44,12 @@ follow. Car data is fetched on demand for the selected driver only.
   loss measured from real green-flag stops. This is the same approach that cut forecast error
   by 20 % in the [notebook](../notebooks/tyre_degradation.ipynb);
 - pit window for the selected driver: which lap to stop, which compound, gain vs. staying out;
+- before the race has enough laps: tyre wear forecast from long runs in the same weekend's
+  practice and sprint, blended with the season median (the method and its check against 16
+  races are in the [strategy notebook](../notebooks/strategy_sim.ipynb), section 6);
+- Safety Car risk: the chance of a Safety Car or VSC before the flag (2026 season rate). Under a
+  Safety Car or VSC it also says whether to box now at the reduced cost or keep the
+  green-flag plan;
 - wet races: intermediate/wet tyres, with a *track improving* flag when the track gets faster
   quicker than the tyres wear;
 - 2019–2024 races: a late stop for fresh softs to chase the fastest-lap point when the gap to
@@ -62,7 +68,8 @@ source (OpenF1 / F1 feed / archive / recording / sim)
 | `openf1.py` | OpenF1 tables → F1 feed events, disk cache, rate-limit handling |
 | `sources.py` | F1 SignalR Core feed, static archive, recordings |
 | `decode.py`, `state.py` | `.z` decoding, patch reducer, track outline, view model |
-| `history.py`, `strategy.py` | lap history from the patch stream; degradation and pit window in pure Python |
+| `history.py`, `strategy.py` | lap history from the patch stream; degradation, pit window and Safety Car calls in pure Python |
+| `practice.py` | pre-race tyre wear from the weekend's practice long runs (fetched in the background) |
 | `player.py` | in-memory timeline, seeking replays from the start |
 | `server.py` | HTTP + WebSocket server and playback commands |
 | `sim.py` | synthetic race in feed format |

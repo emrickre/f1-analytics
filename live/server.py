@@ -36,11 +36,11 @@ from websockets.datastructures import Headers
 from websockets.exceptions import ConnectionClosed
 from websockets.http11 import Response
 
-from . import openf1
+from . import openf1, practice
 from .player import Player
 from .sources import http_get, recorded
 from .state import SessionState
-from .strategy import strategy_view
+from .strategy import FUEL, strategy_view
 
 log = logging.getLogger('live.server')
 STATIC = Path(__file__).parent / 'static'
@@ -71,6 +71,8 @@ class LiveServer:
         self.clients = set()
         self.ext_outline = None        # kwargs для TrackOutline.set_external
         self._circuit_tried = set()
+        self.pre_race = None           # износ по практикам уикенда (live/practice.py)
+        self._pre_race_for = None
         self._stream_task = None
         self._load_task = None
         self.focus = {}                # ws → номер пилота для телеметрии
@@ -93,6 +95,7 @@ class LiveServer:
         except Exception:
             log.exception('bad message: %.300s', ev)
         self._maybe_fetch_outline()
+        self._maybe_fetch_pre_race()
 
     def reset_state(self, outline=None):
         """Чистое состояние (перемотка назад); готовый контур сохраняется."""
@@ -109,6 +112,7 @@ class LiveServer:
         self.tel.clear()
         self._tel_sent.clear()
         self._circuit_tried.clear()
+        self.pre_race = self._pre_race_for = None
         self.reset_state()
 
     def set_outline(self, pts, rotation=0, corners=(), source='external'):
@@ -126,6 +130,25 @@ class LiveServer:
             return
         year = (info.get('StartDate') or '')[:4] or str(datetime.now().year)
         asyncio.get_running_loop().create_task(self._fetch_outline(key, year))
+
+    def _maybe_fetch_pre_race(self):
+        info = self.state.data.get('SessionInfo') or {}
+        meeting = info.get('Meeting') or {}
+        key = (meeting.get('Name'), info.get('StartDate'))
+        if (info.get('Type') != 'Race' or not all(key) or key == self._pre_race_for
+                or ((meeting.get('Circuit') or {}).get('Key') or 0) < 0):   # симулятор
+            return
+        self._pre_race_for = key
+        asyncio.get_running_loop().create_task(self._fetch_pre_race(info, key))
+
+    async def _fetch_pre_race(self, info, key):
+        try:
+            res = await asyncio.to_thread(practice.for_race, info, FUEL)
+        except Exception as e:          # нет сети, OpenF1 закрыт на время live…
+            log.warning('practice for %s: %s', key[0], e)
+            return
+        if key == self._pre_race_for:   # пока грузили, могли открыть другую сессию
+            self.pre_race = res
 
     async def _fetch_outline(self, key, year):
         url = f'https://api.multiviewer.app/api/v1/circuits/{key}/{year}'
@@ -298,9 +321,11 @@ class LiveServer:
                 broadcast(self.clients, self._state_msg())
                 last_state = key
             # Стратегия меняется раз в круг — не чаще раза в секунду.
-            key = (id(st), st.history.version)
+            # + прогноз по практикам (приходит в фоне) и SC/VSC на трассе
+            key = (id(st), st.history.version, id(self.pre_race),
+                   (st.data.get('TrackStatus') or {}).get('Status'))
             if key != last_strategy and now - last_strategy_t >= 1.0:
-                broadcast(self.clients, dumps(strategy_view(st)))
+                broadcast(self.clients, dumps(strategy_view(st, self.pre_race)))
                 last_strategy, last_strategy_t = key, now
             pb = self.playback()
             if pb != last_pb:
@@ -347,7 +372,7 @@ class LiveServer:
             await ws.send(self._outline_msg())
             await ws.send(self._state_msg())
             await ws.send(dumps({'type': 'playback', **self.playback()}))
-            await ws.send(dumps(strategy_view(self.state)))
+            await ws.send(dumps(strategy_view(self.state, self.pre_race)))
             async for raw in ws:
                 try:
                     await self.command(ws, json.loads(raw))

@@ -14,6 +14,7 @@ from live.sim import SimSource
 from live.sources import parse_json_stream
 from live.state import SessionState, merge
 from live import strategy as LS
+from live import practice as LP
 from live.history import lap_seconds, parse_gap
 
 
@@ -536,6 +537,111 @@ class PlayerTest(unittest.TestCase):
         self.assertEqual(self.laps(server), 99)
         st = p.status()
         self.assertEqual((st['t'], st['min'], st['max']), (59.0, -40.0, 59.0))
+
+
+class PracticePriorTest(unittest.TestCase):
+    T0 = datetime(2026, 5, 1, 12, 0, tzinfo=timezone.utc)
+
+    def raw(self, sprint_rain=False):
+        iso = lambda s: (self.T0 + timedelta(seconds=s)).isoformat()
+        laps = [{'driver_number': 1, 'lap_number': n, 'date_start': iso(90 * (n - 1)),
+                 'lap_duration': 90.0, 'is_pit_out_lap': n == 1} for n in range(1, 11)]
+        return {'laps': laps, 'pit': [],
+                'stints': [{'driver_number': 1, 'stint_number': 1, 'lap_start': 1, 'lap_end': 10,
+                            'compound': 'MEDIUM', 'tyre_age_at_start': 2}],
+                'race_control': [{'date': iso(90 * 5 + 30), 'flag': 'YELLOW', 'message': 'YELLOW IN TRACK SECTOR 4'}],
+                'weather': [{'date': iso(0), 'rainfall': 0}, {'date': iso(90 * 8 + 1), 'rainfall': 1}]}
+
+    def test_session_laps_filters(self):
+        laps = LP.session_laps(self.raw())
+        # круг выезда (1), жёлтый флаг (6), дождь с начала 10-го круга
+        self.assertEqual([r['lap'] for r in laps], [2, 3, 4, 5, 7, 8, 9])
+        self.assertEqual(laps[0]['comp'], 'MEDIUM')
+        self.assertEqual(laps[0]['age'], 3)                 # 2 круга до старта стинта + 1
+        sprint = LP.session_laps({**self.raw(), 'laps': [dict(r, is_pit_out_lap=False)
+                                                        for r in self.raw()['laps']]}, sprint=True)
+        self.assertNotIn(1, [r['lap'] for r in sprint])     # старт спринта
+
+    def runs(self, deg, fuel=0.05):
+        """6 отрезков по 10 кругов + быстрый круг и круг охлаждения в каждом."""
+        import random
+        rnd = random.Random(4)
+        laps = []
+        for run in range(6):
+            comp = 'MEDIUM' if run % 2 else 'HARD'
+            base = 90 + rnd.gauss(0, 0.5)
+            ts = [base - 2.5] + [base + (deg[comp] - fuel) * a + rnd.gauss(0, 0.03)
+                                 for a in range(10)] + [base * 1.3]
+            laps += [(1, {'num': run, 'stint': 1, 'lap': i + 1, 't': t, 'comp': comp, 'age': i})
+                     for i, t in enumerate(ts)]
+        return LP.long_runs(laps, fuel)
+
+    def test_wear_recovered_net_of_fuel(self):
+        runs = self.runs({'HARD': 0.04, 'MEDIUM': 0.09})
+        self.assertEqual(len(runs), 6)
+        self.assertEqual({len(r) for r in runs.values()}, {10})   # попытка и охлаждение отброшены
+        w = LP.wear(runs)
+        self.assertAlmostEqual(w['HARD']['deg'], 0.04, delta=0.01)
+        self.assertAlmostEqual(w['MEDIUM']['deg'], 0.09, delta=0.01)
+        self.assertEqual(w['HARD']['runs'], 3)
+        self.assertGreater(w['HARD']['se'], 0)
+
+    def test_pre_race_shrinks_to_season(self):
+        k = {'prior': {'SOFT': 0.05, 'MEDIUM': 0.05, 'HARD': 0.05}, 'tau2': 0.003, 'bias': 0.02, 'delta2': 0.003}
+        pr = LP.pre_race({'MEDIUM': {'deg': 0.17, 'se': 0.0, 'runs': 9}}, k)
+        self.assertEqual(pr['HARD']['deg'], 0.05)            # нет отрезков — медиана сезона
+        self.assertEqual(pr['HARD']['weight'], 0.0)
+        self.assertAlmostEqual(pr['MEDIUM']['weight'], 0.5)  # se = 0: tau² = delta²
+        self.assertAlmostEqual(pr['MEDIUM']['deg'], 0.05 + 0.5 * (0.17 - 0.02 - 0.05))
+
+    def race(self, status='1', laps=5):
+        st = SessionState()
+        st.apply('SessionInfo', {'Type': 'Race', 'Name': 'Race', 'StartDate': '2026-05-03T13:00:00'})
+        st.apply('TrackStatus', {'Status': '1'})
+        st.apply('LapCount', {'CurrentLap': laps, 'TotalLaps': 50})
+        for d in range(6):
+            for lap in range(1, laps + 1):
+                feed_lap(st, str(d), lap, 90 + d * 0.3, d + 1, f'+{d * 2.0}', comp='MEDIUM', age=lap)
+        st.apply('TrackStatus', {'Status': status})
+        return st
+
+    PRE = {'sessions': ['Practice 2'], 'runs': 12, 'compounds': {
+        'SOFT': {'deg': 0.12}, 'MEDIUM': {'deg': 0.10}, 'HARD': {'deg': 0.03}}}
+
+    def test_practice_fills_pit_window_early(self):
+        st = self.race()
+        self.assertEqual(LS.strategy_view(st)['windows']['0']['options'], [])   # мало кругов
+        v = LS.strategy_view(st, self.PRE)
+        w = v['windows']['0']
+        self.assertEqual(w['options'][0]['compound'], 'HARD')
+        self.assertIn('MEDIUM', w['practice'])
+        self.assertEqual(v['preRace'], self.PRE)
+        self.assertNotIn('source', v['deg'].get('MEDIUM', {}))              # своя оценка не подменяется
+        json.dumps(v)
+
+    def test_sc_risk_and_box_under_sc(self):
+        v = LS.strategy_view(self.race(), self.PRE)
+        self.assertAlmostEqual(v['scRisk']['rest'], 1 - (1 - LS.SC_RATE) ** 45)
+        self.assertIsNone(v['scRisk']['now'])
+        self.assertIsNone(v['windows']['0']['neutral'])
+        v = LS.strategy_view(self.race(status='4'), self.PRE)
+        n = v['windows']['0']['neutral']
+        self.assertEqual((v['scRisk']['now'], n['kind'], n['compound']), ('SC', 'SC', 'HARD'))
+        self.assertAlmostEqual(n['cost'], v['pitLoss']['value'] * 0.5)
+        self.assertGreater(n['vs_plan'], 0)          # стоп за полцены лучше обычного позже
+        # не гонка — ни риска, ни практики
+        st = self.race()
+        st.apply('SessionInfo', {'Type': 'Qualifying'})
+        v = LS.strategy_view(st, self.PRE)
+        self.assertIsNone(v['scRisk'])
+        self.assertIsNone(v['preRace'])
+
+    def test_neutral_stop_not_worth_late(self):
+        deg = {'MEDIUM': {'deg': 0.05, 'n': 100}, 'HARD': {'deg': 0.03, 'n': 100}}
+        # 9 кругов до финиша: 7 из них за SC — свежие шины почти не успеют окупиться
+        n = LS.neutral_stop(deg, 'MEDIUM', 30, 10, 20.0, 'SC')
+        self.assertLess(n['gain'], 0)
+        self.assertIsNone(LS.neutral_stop(deg, 'MEDIUM', 30, 8, 20.0, 'SC'))
 
 
 if __name__ == '__main__':

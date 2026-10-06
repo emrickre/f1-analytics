@@ -74,35 +74,53 @@ def practice_deg(runs, min_laps=MIN_LAPS):
     return pd.DataFrame(rows)
 
 
+def _merge(practice, race_deg):
+    y = race_deg[['race', 'compound', 'deg_s_per_lap']].rename(columns={'deg_s_per_lap': 'race_deg'})
+    return y.merge(practice[['race', 'compound', 'deg', 'se']].rename(columns={'deg': 'practice'}),
+                   on=['race', 'compound'], how='left')
+
+
+def shrinkage(m):
+    """Параметры сжатия по таблице гонок (race, compound, race_deg, practice, se):
+    prior — медиана износа по составам; tau2 — разброс износа между трассами;
+    bias и delta2 — сдвиг практики относительно гонки и её шум сверх `se`."""
+    o = m.dropna(subset=['practice'])
+    bias = float((o['practice'] - o['race_deg']).median())
+    return {'prior': m.groupby('compound')['race_deg'].median().to_dict(),
+            'tau2': float(m.groupby('compound')['race_deg'].var().mean()),
+            'bias': bias,
+            'delta2': float(max(((o['practice'] - bias - o['race_deg']) ** 2 - o['se'] ** 2).mean(), 1e-6))}
+
+
+def shrink(practice, se, prior, k):
+    """(прогноз, вес практики) — среднее prior и (практика − bias) с весами 1/tau² и 1/(se² + delta²)."""
+    if practice is None or practice != practice:          # нет практики (None / NaN)
+        return prior, 0.0
+    s2 = se ** 2 + k['delta2']
+    w = (1 / s2) / (1 / k['tau2'] + 1 / s2)
+    return prior + w * (practice - k['bias'] - prior), w
+
+
 def combine(practice, race_deg):
     """Прогноз износа в гонке до гонки: медиана сезона, уточнённая практикой.
 
-    Для каждой гонки всё считается только по **другим** гонкам (leave-one-race-out):
-    * prior — медиана износа состава в остальных гонках;
-    * tau² — разброс износа между трассами;
-    * bias и delta² — систематический сдвиг практики относительно гонки и её
-      дополнительный шум сверх `se` (метод моментов);
-    * post — среднее prior и (практика − bias) с весами 1/tau² и 1/(se² + delta²).
+    Для каждой гонки параметры сжатия (`shrinkage`) считаются только по **другим**
+    гонкам (leave-one-race-out).
     → race, compound, race_deg (факт), practice, se, prior, post, weight.
     """
-    y = race_deg[['race', 'compound', 'deg_s_per_lap']].rename(columns={'deg_s_per_lap': 'race_deg'})
-    m = y.merge(practice[['race', 'compound', 'deg', 'se']].rename(columns={'deg': 'practice'}),
-                on=['race', 'compound'], how='left')
+    m = _merge(practice, race_deg)
     out = []
     for row in m.itertuples():
-        other = m[m['race'] != row.race]
-        prior = other.loc[other['compound'] == row.compound, 'race_deg'].median()
-        tau2 = other.groupby('compound')['race_deg'].var().mean()
-        o = other.dropna(subset=['practice'])
-        bias = (o['practice'] - o['race_deg']).median()
-        delta2 = max(((o['practice'] - bias - o['race_deg']) ** 2 - o['se'] ** 2).mean(), 1e-6)
-        if pd.isna(row.practice):
-            post, w = prior, 0.0
-        else:
-            w = (1 / (row.se ** 2 + delta2)) / (1 / tau2 + 1 / (row.se ** 2 + delta2))
-            post = prior + w * (row.practice - bias - prior)
+        k = shrinkage(m[m['race'] != row.race])
+        prior = k['prior'][row.compound]
+        post, w = shrink(row.practice, row.se, prior, k)
         out.append({'prior': prior, 'post': post, 'weight': w})
     return pd.concat([m, pd.DataFrame(out, index=m.index)], axis=1)
+
+
+def season_shrinkage(practice, race_deg):
+    """Параметры сжатия по всему сезону — для live-приложения (live/practice.py)."""
+    return shrinkage(_merge(practice, race_deg))
 
 
 def prior_offsets(params, race):

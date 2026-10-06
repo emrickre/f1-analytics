@@ -25,6 +25,14 @@ FL_MARGIN = 1.0         # с — запас отрыва от машины сз�
 FL_TIGHT = 3.0          # с — меньше отрыв ещё возможен: на свежем SOFT круг выезда
                         # быстрее среднего стопа (Лас-Вегас 2024, NOR: 21.2 с против 23.6)
 
+# Нейтрализации сезона 2026 (notebooks/strategy_sim.ipynb, analysis/simulate.py):
+# вероятность начала на «зелёном» круге, доля полного SC, средняя длина в кругах
+# и цена пит-стопа под ней в долях от обычной.
+SC_RATE = 0.040
+SC_SHARE = 0.31
+NEUTRAL = {'SC': {'ratio': 0.50, 'laps': 7}, 'VSC': {'ratio': 0.84, 'laps': 4}}
+TRACK_NEUTRAL = {'4': 'SC', '6': 'VSC'}     # TrackStatus.Status
+
 
 def clean_laps(history):
     """Чистые круги темпа: [(num, row)] — те же правила, что analysis/clean.py."""
@@ -99,6 +107,53 @@ def pit_loss(history, clean):
     return median(losses), len(losses)
 
 
+def usable(d):
+    """Оценки износа хватает для решения: своя по гонке или прогноз по практикам."""
+    return d['n'] >= MIN_LAPS_FOR_ESTIMATE or d.get('source') == 'practice'
+
+
+def with_practice(deg, pre):
+    """Износ для решений: пока в гонке мало кругов состава — прогноз по практикам."""
+    if not pre:
+        return deg
+    out = dict(deg)
+    for comp, p in pre['compounds'].items():
+        if comp not in deg or deg[comp]['n'] < MIN_LAPS_FOR_ESTIMATE:
+            out[comp] = {'deg': p['deg'], 'se': None, 'n': deg.get(comp, {}).get('n', 0),
+                         'source': 'practice'}
+    return out
+
+
+def neutral_stop(deg, compound, age, laps_left, loss, kind):
+    """Заехать сейчас, под SC/VSC, или ехать по плану (одна остановка позже или ни одной)?
+
+    Как политика «реагировать» в analysis/simulate.py: стоп стоит долю обычной
+    потери (NEUTRAL), а круги этой нейтрализации (средняя длина) у всех одинаково
+    медленные и в сравнении не участвуют.
+    → {'kind', 'cost', 'compound', 'gain' (против «без остановки»), 'vs_plan'} или None.
+    """
+    cur = deg.get(compound)
+    n = NEUTRAL[kind]
+    green = laps_left - n['laps']
+    if cur is None or compound not in DRY or green < 3:
+        return None
+    d_cur = max(cur['deg'], 0.0)
+    stay = _stint_cost(d_cur, age + n['laps'], green)
+    cost = loss * n['ratio']
+    best = None
+    for comp, d in deg.items():
+        if comp not in DRY or comp == compound or not usable(d):
+            continue
+        gain = stay - (cost + _stint_cost(max(d['deg'], 0.0), n['laps'], green))
+        if best is None or gain > best['gain']:
+            best = {'compound': comp, 'gain': gain}
+    if best is None:
+        return None
+    later = pit_window(deg, compound, age + n['laps'], green, loss)
+    plan = max([0.0] + [w['gain'] for w in later])
+    return {'kind': kind, 'cost': cost, **best, 'vs_plan': best['gain'] - plan}
+
+
 def _stint_cost(deg, start_age, laps):
     """Σ deg·(start_age + i), i = 0..laps−1 — потеря темпа на износе за стинт."""
     return deg * (laps * start_age + laps * (laps - 1) / 2) if laps > 0 else 0.0
@@ -121,7 +176,7 @@ def pit_window(deg, compound, age, laps_left, loss, min_new_stint=3):
     same_class = WET if compound in WET else DRY
     out = []
     for comp, d in deg.items():
-        if (comp not in same_class or d['n'] < MIN_LAPS_FOR_ESTIMATE
+        if (comp not in same_class or not usable(d)
                 or (comp == compound and compound in DRY)):
             continue
         d_new = max(d['deg'], 0.0)
@@ -205,14 +260,29 @@ def fastest_lap_stop(state, num, laps, total, deg, loss):
 
 # --- для фронтенда --------------------------------------------------------------
 
-def strategy_view(state):
-    """Компактный JSON для вкладки Strategy."""
+def sc_risk(state, total):
+    """Риск нейтрализации до финиша и цена стопа под ней (только гонка с дистанцией)."""
+    d = state.data
+    if not total or (d.get('SessionInfo') or {}).get('Type') != 'Race':
+        return None
+    left = max(int(total) - int((d.get('LapCount') or {}).get('CurrentLap') or 0), 0)
+    now = TRACK_NEUTRAL.get(str((d.get('TrackStatus') or {}).get('Status')))
+    return {'perLap': SC_RATE, 'shareSC': SC_SHARE, 'lapsLeft': left,
+            'rest': 1 - (1 - SC_RATE) ** left, 'now': now,
+            'ratio': {k: v['ratio'] for k, v in NEUTRAL.items()}}
+
+
+def strategy_view(state, pre=None):
+    """Компактный JSON для вкладки Strategy; pre — износ по практикам (live/practice.py)."""
     h, d = state.history, state.data
     lap_info = d.get('LapCount') or {}
     total = lap_info.get('TotalLaps')
     clean = clean_laps(h)
     deg = degradation(clean)
     loss, n_stops = pit_loss(h, clean)
+    risk = sc_risk(state, total)
+    pre = pre if risk else None              # прогноз по практикам — только для гонки
+    use = with_practice(deg, pre)
     drivers = d.get('DriverList') or {}
 
     out_laps, windows = {}, {}
@@ -230,8 +300,11 @@ def strategy_view(state):
                 # Круг заезда: после k кругов на старых шинах (k=0 — в конце текущего).
                 'options': [dict(w, stop_lap=last['lap'] + max(1, w['in_laps']),
                                  window=[last['lap'] + max(1, k) for k in w['window']])
-                            for w in pit_window(deg, last['comp'], last['age'], left, loss)],
-                'fastestLap': fastest_lap_stop(state, num, laps, int(total), deg, loss),
+                            for w in pit_window(use, last['comp'], last['age'], left, loss)],
+                'fastestLap': fastest_lap_stop(state, num, laps, int(total), use, loss),
+                'neutral': (neutral_stop(use, last['comp'], last['age'], left, loss, risk['now'])
+                            if risk and risk['now'] else None),
+                'practice': [c for c, v in use.items() if v.get('source') == 'practice'],
             }
     return {
         'type': 'strategy',
@@ -250,6 +323,8 @@ def strategy_view(state):
                 for c, v in deg.items()},
         'fuel': FUEL,
         'pitLoss': {'value': loss, 'stops': n_stops},
+        'preRace': pre,
+        'scRisk': risk,
         'windows': windows,
         'cleanLaps': len(clean),
     }
