@@ -27,7 +27,7 @@ import json
 import logging
 import mimetypes
 import urllib.parse
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from http import HTTPStatus
 from pathlib import Path
 
@@ -75,6 +75,7 @@ class LiveServer:
         self._pre_race_for = None
         self._stream_task = None
         self._load_task = None
+        self._fill_task = None         # догрузка координат/отрывов во время воспроизведения
         self.focus = {}                # ws → номер пилота для телеметрии
         self.tel = {}                  # номер → CarData (None — грузится/нет данных)
         self._tel_sent = {}            # ws → (номер, до какого t_ms отправлено)
@@ -194,7 +195,11 @@ class LiveServer:
         if hasattr(source, 'on_progress'):
             source.on_progress = progress
         try:
-            tl = await asyncio.to_thread(source.load_timeline)
+            if isinstance(source, openf1.OpenF1Source):
+                # долгое (координаты, отрывы) — уже во время воспроизведения
+                tl = await asyncio.to_thread(source.load_timeline, True)
+            else:
+                tl = await asyncio.to_thread(source.load_timeline)
         except BaseException as e:   # SystemExit из резолверов тоже сюда
             log.exception('load failed')
             p.loading, p.error = None, str(e) or e.__class__.__name__
@@ -204,9 +209,54 @@ class LiveServer:
             self._stream_task.cancel()
             self._stream_task = None
             self.streaming = False
+        if self._fill_task:
+            self._fill_task.cancel()
         self.new_session()
         p.set_timeline(tl, speed=self.speed, skip=self.skip)
         self.skip = 0.0
+        if tl.backfill:
+            self._fill_task = loop.create_task(self._backfill(tl))
+
+    async def _backfill(self, tl):
+        """Догрузить координаты и отрывы, PARALLEL запросов одновременно, начиная с
+        текущего момента ленты (и с нового места после перемотки)."""
+        p, fill = self.player, tl.backfill
+        done = 0
+
+        def now():
+            return tl.base + timedelta(seconds=p.pos) if tl.base else \
+                datetime.now(timezone.utc)
+
+        async def worker():
+            nonlocal done
+            while p.tl is tl and (job := fill.take(now())):
+                try:
+                    msgs = await asyncio.to_thread(fill.run, job)
+                except Exception as e:      # сеть, лимит, OpenF1 закрыт на время live
+                    wait = fill.retry(job)
+                    log.warning('backfill %s: %s%s', job, e,
+                                f' — повтор через {wait} с' if wait else ' — пропускаю')
+                    if wait:
+                        await asyncio.sleep(wait)
+                        fill.jobs.append(job)
+                        continue
+                    msgs = []
+                if p.tl is not tl:
+                    return
+                p.extend(msgs)
+                done += 1
+                p.buffer = f'loading car positions {done}/{fill.total}' if done < fill.total else None
+                p._changed()
+
+        p.buffer = f'loading car positions 0/{fill.total}'
+        p._changed()
+        t0 = asyncio.get_running_loop().time()
+        await asyncio.gather(*(worker() for _ in range(openf1.PARALLEL)))
+        if p.tl is tl:
+            p.buffer = None
+            p._changed()
+            log.info('backfill: %d parts in %.1f s', fill.total,
+                     asyncio.get_running_loop().time() - t0)
 
     # --- команды из браузера --------------------------------------------------
 
@@ -262,8 +312,21 @@ class LiveServer:
             self._load_telemetry(key, num, meta.get('finished', True)))
 
     async def _load_telemetry(self, key, num, finished):
+        src = openf1.OpenF1Source()
+        now = self.feed_now_ms()
+        if now and not (finished and (src.cache_dir / str(key) / f'car_{num}.bin').exists()):
+            # Сначала окно вокруг текущего момента (~1 с), вся сессия (~5 с) — следом.
+            at = datetime.fromtimestamp(now / 1000, timezone.utc)
+            window = (at - timedelta(minutes=1), at + timedelta(minutes=5))
+            try:
+                quick = await asyncio.to_thread(src.car_data, key, num, finished, window)
+                cur = self.player.tl.meta.get('session_key') if self.player.tl else None
+                if cur == key and self.tel.get(num) is None:
+                    self.tel[num] = quick
+            except Exception as e:
+                log.warning('telemetry window %s/%s: %s', key, num, e)
         try:
-            cd = await asyncio.to_thread(openf1.OpenF1Source().car_data, key, num, finished)
+            cd = await asyncio.to_thread(src.car_data, key, num, finished)
         except Exception as e:
             log.warning('telemetry %s/%s: %s', key, num, e)
             self.tel.pop(num, None)

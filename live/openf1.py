@@ -6,8 +6,9 @@ OpenF1 отдаёт таблицы (круги, позиции, шины, коо
 сервер и фронтенд работают без изменений.
 
 Бесплатно доступны прошедшие сессии (обычно вскоре после окончания);
-live-доступ у OpenF1 платный. Источник отдаёт ленту целиком (load_timeline),
-воспроизведением управляет live/player.py.
+live-доступ у OpenF1 платный. Источник отдаёт ленту (load_timeline),
+воспроизведением управляет live/player.py; долгое (координаты, отрывы) может
+догружаться уже во время воспроизведения (Backfill).
 """
 
 import bisect
@@ -23,6 +24,7 @@ import urllib.parse
 import zlib
 from array import array
 from itertools import accumulate, chain
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -34,6 +36,8 @@ log = logging.getLogger('live.openf1')
 
 API = 'https://api.openf1.org/v1/'
 POS_BUCKET = 0.25   # с — частота кадров Position (сэмплы машин не синхронны)
+POS_CHUNK = timedelta(minutes=5)   # координаты всех машин грузятся кусками по времени
+PARALLEL = 3        # одновременных запросов к OpenF1 (бесплатный лимит — 3 в секунду)
 
 
 def ts_of(s):
@@ -204,6 +208,9 @@ def read_series(path):
     return out
 
 
+_LIMITS = {'H': (0, 65535), 'h': (-32768, 32767), 'b': (-128, 127)}
+
+
 class CarData:
     """Телеметрия машины в массивах: t_ms, speed, rpm, gear, throttle, brake, drs."""
     __slots__ = ('t', 'speed', 'rpm', 'gear', 'throttle', 'brake', 'drs')
@@ -221,15 +228,21 @@ class CarData:
         return {name: getattr(self, name) for name in self.TYPES}
 
     def __init__(self, rows):
+        # Выбросы OpenF1 (передача 255, отрицательные обороты…) обрезаются по типу
+        # массива: иначе array() падает и телеметрии пилота нет совсем.
+        def col(key, code, default=0):
+            lo, hi = _LIMITS[code]
+            return array(code, (min(max(int(v), lo), hi) if (v := r.get(key)) is not None
+                                else default for r in rows))
+
         self.t = array('q', (int(ts_of(r['date']).timestamp() * 1000) for r in rows))
-        self.speed = array('H', ((r.get('speed') or 0) for r in rows))
-        self.rpm = array('H', ((r.get('rpm') or 0) for r in rows))
-        self.gear = array('b', ((r.get('n_gear') or 0) for r in rows))
-        self.throttle = array('h', ((r.get('throttle') or 0) for r in rows))
-        self.brake = array('h', ((r.get('brake') or 0) for r in rows))
+        self.speed = col('speed', 'H')
+        self.rpm = col('rpm', 'H')
+        self.gear = col('n_gear', 'b')
+        self.throttle = col('throttle', 'h')
+        self.brake = col('brake', 'h')
         # DRS: None в данных (с 2026 его нет) → -1; 10/12/14 — открыт.
-        self.drs = array('b', (-1 if r.get('drs') is None else min(r['drs'], 127)
-                               for r in rows))
+        self.drs = col('drs', 'b', default=-1)
 
     def window(self, t0, t1):
         """Сэмплы с t0 < t <= t1 для отправки в браузер."""
@@ -259,7 +272,7 @@ class OpenF1Source:
     def _get(self, endpoint, cache=None, **params):
         if cache and cache.exists():
             return json.loads(cache.read_text())
-        query = '&'.join(f'{k}={urllib.parse.quote(str(v), safe=":")}' for k, v in params.items())
+        query = _query(params)
         url = f'{API}{endpoint}?{query}'
         for attempt in range(8):
             try:
@@ -275,6 +288,11 @@ class OpenF1Source:
                     raise OpenF1Locked(
                         'OpenF1 is closed to free users while a session is live — '
                         'cached sessions still open; the rest after it ends') from None
+                if e.code >= 500 and attempt < 3:
+                    # OpenF1 изредка отвечает 500/502 под нагрузкой — повторяем.
+                    log.info('OpenF1 %s, повтор', e.code)
+                    time.sleep(1 + attempt)
+                    continue
                 if e.code == 429 and attempt < 7:
                     # Лимит бесплатного доступа (в секунду и в минуту) — ждём.
                     wait = e.headers.get('Retry-After')
@@ -284,6 +302,12 @@ class OpenF1Source:
                     time.sleep(wait)
                     continue
                 raise
+            except (TimeoutError, urllib.error.URLError) as e:
+                # обрыв сети, DNS, ответ «по капле» дольше таймаута — пара повторов
+                if attempt >= 2:
+                    raise
+                log.info('OpenF1: %s, повтор', e)
+                time.sleep(2 * (attempt + 1))
         time.sleep(0.35)                   # бесплатный лимит — ~3 запроса/с
         if cache is not None:
             cache.parent.mkdir(parents=True, exist_ok=True)
@@ -316,10 +340,16 @@ class OpenF1Source:
             cache.write_text(json.dumps(sess))
         return sess
 
-    def load(self):
+    TABLES = ('drivers', 'laps', 'stints', 'pit', 'race_control', 'weather', 'position')
+
+    def load(self, progressive=False):
+        """Таблицы сессии и координаты машин.
+
+        progressive=True: то, чего нет на диске из долгого (координаты, отрывы), не
+        ждём — это догружает `Backfill` уже во время воспроизведения.
+        """
         sess = self.resolve()
         key = sess['session_key']
-        end = ts_of(sess['date_end'])
         # Кешируем только завершённые сессии — иначе данные ещё дополняются.
         finished = self._finished(sess)
         cdir = self.cache_dir / str(key) if finished else None
@@ -327,32 +357,73 @@ class OpenF1Source:
 
         log.info('OpenF1: %s %s — %s (key %s)', sess['year'], sess['location'],
                  sess['session_name'], key)
-        d = {'session': sess}
+        d = {'session': sess, 'cdir': cdir}
         d['meeting'] = (self._get('meetings', c('meeting'),
                                   meeting_key=sess['meeting_key']) or [{}])[0]
-        for ep in ('drivers', 'laps', 'stints', 'pit', 'race_control',
-                   'weather', 'position', 'intervals'):
-            self.on_progress(f'tables: {ep}')
-            d[ep] = self._get(ep, c(ep), session_key=key)
-            log.info('  %-13s %6d', ep, len(d[ep]))
+        later = progressive and not (cdir and c('intervals').exists())
+        eps = self.TABLES + (() if later else ('intervals',))
+        self.on_progress('tables')
+        with ThreadPoolExecutor(PARALLEL) as ex:
+            for ep, rows in zip(eps, ex.map(lambda ep: self._get(ep, c(ep), session_key=key), eps)):
+                d[ep] = rows
+                log.info('  %-13s %6d', ep, len(rows))
+        d.setdefault('intervals', None)            # None — догрузит Backfill
         d['pit'] = normalize_pits(d['pit'], d['laps'])
         d['stints'] = reconcile_stints(d['stints'], d['pit'], d['laps'])
 
-        start = ts_of(sess['date_start']) - timedelta(minutes=2)
-        stop = end + timedelta(minutes=2)
-        d['location'] = {}
-        for i, drv in enumerate(d['drivers'], 1):
-            num = drv['driver_number']
-            self.on_progress(f"car positions {i}/{len(d['drivers'])}")
-            cols = self._series(
-                cdir, f'location_{num}',
-                lambda cache: dict(zip('txy', compact_locations(self._get(
-                    'location', cache, session_key=key, driver_number=num,
-                    **{'date>': start.isoformat().replace('+00:00', ''),
-                       'date<': stop.isoformat().replace('+00:00', '')})))))
-            d['location'][str(num)] = (cols['t'], array('l', cols['x']), array('l', cols['y']))
-            log.info('  location #%-3s %6d', num, len(cols['t']))
+        d['location'], d['positions'], d['missing'] = {}, {}, []
+        d['windows'] = position_windows(sess)
+        nums = [x['driver_number'] for x in d['drivers']]
+        if cdir and nums and all((cdir / f'location_{n}.bin').exists() for n in nums):
+            # кеш прежнего формата: ряд на машину за всю сессию
+            for n in nums:
+                cols = read_series(cdir / f'location_{n}.bin')
+                d['location'][str(n)] = (cols['t'], array('l', cols['x']), array('l', cols['y']))
+            return d
+        for i, (a, b) in enumerate(d['windows']):
+            if progressive and not (cdir and (cdir / f'pos_{i:03d}.bin').exists()):
+                d['missing'].append(i)
+                continue
+            self.on_progress(f"car positions {i + 1}/{len(d['windows'])}")
+            d['positions'][i] = self.positions(sess, cdir, i, a, b)
         return d
+
+    def positions(self, sess, cdir, i, a, b):
+        """Координаты всех машин за окно [a, b) → столбцы t, num, x, y (по времени)."""
+        def fetch(cache):
+            rows = self._get('location', cache, session_key=sess['session_key'],
+                             **{'date>=': _iso(a), 'date<': _iso(b)})
+            rows = sorted((int(ts_of(r['date']).timestamp() * 1000), r['driver_number'],
+                           r['x'], r['y']) for r in rows)
+            return dict(zip(('t', 'num', 'x', 'y'), zip(*rows))) if rows else \
+                {'t': [], 'num': [], 'x': [], 'y': []}
+        return self._series(cdir, f'pos_{i:03d}', fetch)
+
+    def outline_location(self, d):
+        """Координаты машины на самом быстром круге (для контура трассы).
+
+        Берутся из уже загруженного, иначе — один маленький запрос (~1.5 мин одной машины).
+        """
+        lap = _fastest_clean_lap(d)
+        if not lap or d['location']:
+            return d['location']
+        num = lap['driver_number']
+        t0 = ts_of(lap['date_start']) - timedelta(seconds=2)
+        t1 = t0 + timedelta(seconds=lap['lap_duration'] + 4)
+        lo, hi = int(t0.timestamp() * 1000), int(t1.timestamp() * 1000)
+        pts = [(t, x, y) for cols in d['positions'].values()
+               for t, n, x, y in zip(cols['t'], cols['num'], cols['x'], cols['y'])
+               if n == num and lo <= t <= hi]
+        if len(pts) < 50:
+            def fetch(cache):
+                rows = self._get('location', cache, session_key=d['session']['session_key'],
+                                 driver_number=num, **{'date>=': _iso(t0), 'date<': _iso(t1)})
+                return dict(zip('txy', compact_locations(rows)))
+            cols = self._series(d['cdir'], f'outline_{num}', fetch)
+            pts = list(zip(cols['t'], cols['x'], cols['y']))
+        pts.sort()
+        return {str(num): tuple(array(code, col) for code, col in zip('qll', zip(*pts)))} \
+            if pts else {}
 
     def _series(self, cdir, name, fetch):
         """Ряд из компактного кеша `name.bin`; иначе fetch(json_cache) → столбцы.
@@ -476,23 +547,9 @@ class OpenF1Source:
             add(max(t_out, t_in + timedelta(seconds=1)), 'TimingData',
                 {'Lines': {n: {'InPit': False}}})
 
-        # Отрывы в гонке: OpenF1 шлёт их по машине раз в ~4 с, пачками. Строки одной
-        # секунды — одним патчем (25 тыс. событий за гонку → ~5.6 тыс.), время — по
-        # последней строке, чтобы значение не появлялось раньше, чем было известно.
-        group, sec = {}, None
-        for iv in sorted(d['intervals'], key=lambda r: r['date']):
-            if iv['date'][:19] != sec and group:
-                add(t_last, 'TimingData', {'Lines': group})
-                group = {}
-            sec, t_last = iv['date'][:19], ts_of(iv['date'])
-            group[str(iv['driver_number'])] = {
-                'GapToLeader': fmt_gap(iv.get('gap_to_leader')),
-                'IntervalToPositionAhead': {'Value': fmt_gap(iv.get('interval'))}}
-        if group:
-            add(t_last, 'TimingData', {'Lines': group})
-
+        ev += interval_events(d['intervals'] or [])
         OpenF1Source._laps(d, ev, is_race, t_start)
-        OpenF1Source._locations(d, ev)
+        ev += position_events(position_rows(d))
 
         ev.sort(key=lambda e: e[0])
         return ev
@@ -624,46 +681,16 @@ class OpenF1Source:
             ev.append((t, 'TimingData', {'Lines': {n: line}}))
 
     @staticmethod
-    def _locations(d, ev):
-        """Координаты машин → кадры Position с шагом POS_BUCKET."""
-        bucket_ms = int(POS_BUCKET * 1000)
-
-        def frame(b, nums, vals):
-            # Компактный кадр вместо dict'ов: ~10 МБ на гонку вместо ~200.
-            ev.append((datetime.fromtimestamp(b * bucket_ms / 1000, timezone.utc),
-                       'Position', PosFrame(b * bucket_ms, tuple(nums), vals)))
-
-        # Ряды машин уже по времени — сливаем их потоком, без промежуточной
-        # таблицы на сотни тысяч точек.
-        streams = [((t, num, x, y) for t, x, y in zip(ts, xs, ys))
-                   for num, (ts, xs, ys) in d['location'].items()]
-        cur, nums, vals = None, [], array('q')
-        for t, num, x, y in heapq.merge(*streams):
-            b = t // bucket_ms
-            if b != cur and nums:
-                frame(cur, nums, vals)
-                nums, vals = [], array('q')
-            cur = b
-            nums.append(num)
-            vals.extend((x, y, t))
-        if nums:
-            frame(cur, nums, vals)
-
-    @staticmethod
-    def fastest_lap_outline(d):
+    def fastest_lap_outline(d, location=None):
         """Контур трассы по координатам самого быстрого чистого круга."""
-        clean = [x for x in d['laps']
-                 if x.get('lap_duration') and x.get('date_start')
-                 and not x.get('is_pit_out_lap')
-                 and all(x.get(f'duration_sector_{i}') for i in (1, 2, 3))]
-        if not clean:
+        lap = _fastest_clean_lap(d)
+        if not lap:
             return None
-        lap = min(clean, key=lambda x: x['lap_duration'])
         # Окно с запасом ±2 с, затем режем по самой близкой паре точек на
         # стыке: сэмплы идут раз в ~0.27 с (20+ м на прямой).
         t0 = ts_of(lap['date_start']) - timedelta(seconds=2)
         t1 = t0 + timedelta(seconds=lap['lap_duration'] + 4)
-        loc = d['location'].get(str(lap['driver_number']))
+        loc = (d['location'] if location is None else location).get(str(lap['driver_number']))
         if not loc:
             return None
         ts, xs, ys = loc
@@ -687,30 +714,52 @@ class OpenF1Source:
 
     # --- лента для плеера --------------------------------------------------
 
-    def load_timeline(self):
-        d = self.load()
+    def load_timeline(self, progressive=False):
+        """Лента для плеера. progressive=True — см. load(); догрузка — tl.backfill."""
+        d = self.load(progressive)
         ev = self.timeline(d)
         if not ev:
             raise RuntimeError('OpenF1: no data for this session')
         sess, meeting = d['session'], d['meeting']
         base = ev[0][0]
-        msgs = [((t - base).total_seconds(), {'kind': 'msg', 'topic': topic, 'data': data})
-                for t, topic, data in ev]
+        msgs = to_msgs(ev, base)
         title = f"{sess['year']} {meeting_title(meeting, sess['location'])} — " \
                 f"{sess['session_name']}"
         log.info('OpenF1: %s, %d событий', title, len(msgs))
+        fill = Backfill(self, d, base)
         return Timeline(msgs=msgs, base=base,
                         start=(ts_of(sess['date_start']) - base).total_seconds(),
-                        outline=self.fastest_lap_outline(d), title=title,
+                        outline=self._outline(d),
+                        title=title,
                         meta={'session_key': sess['session_key'],
-                              'finished': self._finished(sess)})
+                              'finished': self._finished(sess)},
+                        backfill=fill if fill.jobs else None)
+
+    def _outline(self, d):
+        """Контур — не обязателен: без него сервер возьмёт multiviewer или соберёт
+        контур по позициям машин."""
+        try:
+            return self.fastest_lap_outline(d, self.outline_location(d))
+        except (urllib.error.URLError, OSError, ValueError) as e:
+            log.warning('outline: %s', e)
+            return None
 
     @staticmethod
     def _finished(sess):
         return datetime.now(timezone.utc) > ts_of(sess['date_end']) + timedelta(minutes=30)
 
-    def car_data(self, session_key, num, finished=True):
-        """Телеметрия одной машины за сессию (скорость, обороты, газ…) — компактно."""
+    def car_data(self, session_key, num, finished=True, window=None):
+        """Телеметрия одной машины за сессию (скорость, обороты, газ…) — компактно.
+
+        window=(a, b) — только этот отрезок времени, без кеша: ~0.2 МБ вместо ~6 МБ,
+        чтобы показать телеметрию сразу, пока грузится вся сессия.
+        """
+        if window:
+            rows = self._get('car_data', None, session_key=session_key, driver_number=num,
+                             **{'date>=': _iso(window[0]), 'date<': _iso(window[1])})
+            rows.sort(key=lambda r: r['date'])
+            return CarData(rows)
+
         def fetch(cache):
             rows = self._get('car_data', cache, session_key=session_key, driver_number=num)
             rows.sort(key=lambda r: r['date'])
@@ -718,6 +767,155 @@ class OpenF1Source:
 
         cdir = self.cache_dir / str(session_key) if finished else None
         return CarData.from_columns(self._series(cdir, f'car_{num}', fetch))
+
+
+def _query(params):
+    """Параметры OpenF1: фильтр-сравнение пишется оператором вместо «=»
+    (`date>=2026-…`, `date<2026-…`), остальные — `ключ=значение`."""
+    return '&'.join(f'{k}{urllib.parse.quote(str(v), safe=":")}' if k[-1] in '<>='
+                    else f'{k}={urllib.parse.quote(str(v), safe=":")}'
+                    for k, v in params.items())
+
+
+def _iso(t):
+    return t.isoformat().replace('+00:00', '')
+
+
+def _fastest_clean_lap(d):
+    clean = [x for x in d['laps']
+             if x.get('lap_duration') and x.get('date_start')
+             and not x.get('is_pit_out_lap')
+             and all(x.get(f'duration_sector_{i}') for i in (1, 2, 3))]
+    return min(clean, key=lambda x: x['lap_duration']) if clean else None
+
+
+def position_windows(sess):
+    """Окна по POS_CHUNK от старта −2 мин до конца +2 мин (на границах целых секунд,
+    поэтому кадры POS_BUCKET не разрезаются между кусками)."""
+    a = ts_of(sess['date_start']).replace(microsecond=0) - timedelta(minutes=2)
+    stop = ts_of(sess['date_end']) + timedelta(minutes=2)
+    out = []
+    while a < stop:
+        out.append((a, min(a + POS_CHUNK, stop)))
+        a += POS_CHUNK
+    return out
+
+
+def position_rows(d):
+    """(t_ms, num, x, y) по времени: из рядов по машинам или из кусков по времени."""
+    if d.get('location'):
+        streams = [((t, num, x, y) for t, x, y in zip(ts, xs, ys))
+                   for num, (ts, xs, ys) in d['location'].items()]
+        return heapq.merge(*streams)
+    return (row for i in sorted(d.get('positions') or {}) for row in _chunk_rows(d['positions'][i]))
+
+
+def _chunk_rows(cols):
+    """Столбцы куска → (t, num, x, y); номер — одна общая строка на машину, а не
+    новая на каждую из ~600 тыс. точек гонки (иначе +25 МБ в кадрах)."""
+    names = {}
+    return ((t, names.get(n) or names.setdefault(n, str(n)), x, y)
+            for t, n, x, y in zip(cols['t'], cols['num'], cols['x'], cols['y']))
+
+
+def position_events(rows):
+    """Координаты → кадры Position с шагом POS_BUCKET (компактно, без dict'ов)."""
+    bucket_ms = int(POS_BUCKET * 1000)
+    ev, cur, nums, vals = [], None, [], array('q')
+
+    def frame():
+        # Компактный кадр вместо dict'ов: ~10 МБ на гонку вместо ~200.
+        ev.append((datetime.fromtimestamp(cur * bucket_ms / 1000, timezone.utc),
+                   'Position', PosFrame(cur * bucket_ms, tuple(nums), vals)))
+
+    for t, num, x, y in rows:
+        b = t // bucket_ms
+        if b != cur and nums:
+            frame()
+            nums, vals = [], array('q')
+        cur = b
+        nums.append(num)
+        vals.extend((x, y, t))
+    if nums:
+        frame()
+    return ev
+
+
+def interval_events(intervals):
+    """Отрывы в гонке: OpenF1 шлёт их по машине раз в ~4 с, пачками. Строки одной
+    секунды — одним патчем (25 тыс. событий за гонку → ~5.6 тыс.), время — по
+    последней строке, чтобы значение не появлялось раньше, чем было известно."""
+    ev, group, sec, t_last = [], {}, None, None
+    for iv in sorted(intervals, key=lambda r: r['date']):
+        if iv['date'][:19] != sec and group:
+            ev.append((t_last, 'TimingData', {'Lines': group}))
+            group = {}
+        sec, t_last = iv['date'][:19], ts_of(iv['date'])
+        group[str(iv['driver_number'])] = {
+            'GapToLeader': fmt_gap(iv.get('gap_to_leader')),
+            'IntervalToPositionAhead': {'Value': fmt_gap(iv.get('interval'))}}
+    if group:
+        ev.append((t_last, 'TimingData', {'Lines': group}))
+    return ev
+
+
+def to_msgs(ev, base):
+    """(datetime, topic, data) → (смещение от base, событие плеера), по времени."""
+    ev.sort(key=lambda e: e[0])
+    return [((t - base).total_seconds(), {'kind': 'msg', 'topic': topic, 'data': data})
+            for t, topic, data in ev]
+
+
+class Backfill:
+    """Догрузка во время воспроизведения: куски координат и отрывы.
+
+    Задачи берёт сервер (`take`) — по PARALLEL одновременно — и вставляет готовые
+    события в ленту плеера. Первым идёт кусок, который сейчас на экране, потом
+    отрывы, потом координаты по порядку от текущего момента (и после перемотки).
+    """
+
+    def __init__(self, src, d, base):
+        self.src, self.sess, self.cdir, self.base = src, d['session'], d['cdir'], base
+        self.windows = d['windows']
+        self.jobs = [('pos', i) for i in d['missing']]
+        if d['intervals'] is None:
+            self.jobs.append(('intervals', None))
+        self.total = len(self.jobs)
+        self.failed = {}                 # задача → сколько раз не удалась
+
+    def retry(self, job, attempts=6):
+        """Неудавшаяся задача: пауза перед повтором, с (растёт: 5, 10, 20, 40, 60),
+        или None — попытки кончились. Сбой сети или OpenF1 обычно длится до минуты-двух."""
+        n = self.failed[job] = self.failed.get(job, 0) + 1
+        return min(60, 5 * 2 ** (n - 1)) if n < attempts else None
+
+    def take(self, now):
+        """Следующая задача для момента ленты `now` (datetime) или None."""
+        if not self.jobs:
+            return None
+        pos = [j for j in self.jobs if j[0] == 'pos']
+        ahead = sorted((j for j in pos if self.windows[j[1]][1] > now),
+                       key=lambda j: self.windows[j[1]][0])
+        started = self.total - len(self.jobs)
+        if ('intervals', None) in self.jobs and (started >= 1 or not ahead):
+            job = ('intervals', None)
+        else:
+            job = ahead[0] if ahead else pos[0]
+        self.jobs.remove(job)
+        return job
+
+    def run(self, job):
+        """Скачать (или взять с диска) → события ленты [(смещение, событие)]."""
+        kind, i = job
+        if kind == 'intervals':
+            cache = self.cdir / 'intervals.json' if self.cdir else None
+            rows = self.src._get('intervals', cache, session_key=self.sess['session_key'])
+            ev = interval_events(rows)
+        else:
+            a, b = self.windows[i]
+            cols = self.src.positions(self.sess, self.cdir, i, a, b)
+            ev = position_events(_chunk_rows(cols))
+        return to_msgs(ev, self.base)
 
 
 class OpenF1Locked(RuntimeError):

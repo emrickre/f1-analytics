@@ -417,6 +417,15 @@ class OpenF1Test(unittest.TestCase):
         self.assertEqual(gaps, [(10.9, {'2': '+1.600', '3': '+3.000'}), (14.0, {'2': '+1.800'})])
 
 
+class QueryTest(unittest.TestCase):
+    def test_comparison_filters(self):
+        from live.openf1 import _query
+        # оператор сравнения заменяет «=»: date>==… OpenF1 отвечает 500
+        self.assertEqual(_query({'session_key': 7, 'date>=': '2026-09-06T13:00:00',
+                                 'date<': '2026-09-06T13:05:00'}),
+                         'session_key=7&date>=2026-09-06T13:00:00&date<2026-09-06T13:05:00')
+
+
 class SeriesCacheTest(unittest.TestCase):
     def setUp(self):
         import tempfile
@@ -450,6 +459,11 @@ class SeriesCacheTest(unittest.TestCase):
         self.assertEqual(calls, [old])                       # второй раз — из .bin
         (self.dir / 'location_1.bin').write_bytes(b'junk')   # повреждён — загрузить заново
         self.assertRaises(Exception, src._series, self.dir, 'location_1', lambda c: 1 / 0)
+
+    def test_car_data_clamps_outliers(self):
+        cd = CarData([{'date': '2026-10-03T08:00:00+00:00', 'speed': -5, 'rpm': 70000,
+                       'n_gear': 255, 'throttle': 104, 'brake': 100, 'drs': None}])
+        self.assertEqual(cd.window(0, 10 ** 13)[0][1:], [0, 65535, 127, 104, 100, -1])
 
     def test_car_data_columns(self):
         rows = [{'date': '2026-10-03T08:00:00+00:00', 'speed': 300, 'rpm': 11000, 'n_gear': 8,

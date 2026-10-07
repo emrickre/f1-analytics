@@ -20,8 +20,11 @@ python -m live sim                              # synthetic race, no network nee
 Open http://127.0.0.1:8765. Other sources: `live` (official F1 feed, writes `recordings/*.jsonl`),
 `archive 2024 Monza` (F1 static archive), `replay recordings/….jsonl`.
 
-The first load of an OpenF1 session takes 1–2 minutes (car positions); after that it comes
-from `live_cache/`. OpenF1 is free for past sessions but locks all free access while a session
+The first time an OpenF1 session is opened, playback starts after a few seconds, once lap
+times, tyres and flags have loaded. Car positions and gaps keep loading in the background in
+5-minute chunks, starting from the moment on screen (and from the new spot after a seek). A
+race takes about 30 s in total. Telemetry for the selected driver first loads a window around
+the current moment (~1 s), then the full session. After that everything comes from `live_cache/`. OpenF1 is free for past sessions but locks all free access while a session
 is live. Sessions that are already cached keep working then.
 
 ## Features

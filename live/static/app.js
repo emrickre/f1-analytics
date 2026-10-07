@@ -267,7 +267,8 @@ function onPlayback(m) {
   const status = $('pb-status');
   status.classList.toggle('err', !!m.error);
   status.textContent = m.error ? `Error: ${m.error}`
-    : m.loading ? `⏳ ${m.loading}` : live ? 'live feed' : (m.title || '');
+    : m.loading ? `⏳ ${m.loading}` : live ? 'live feed'
+    : (m.title || '') + (m.buffer ? ` · ⏳ ${m.buffer}` : '');
   $('ses-load').disabled = !!m.loading;
   if (live) return;
 
