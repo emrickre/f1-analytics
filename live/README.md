@@ -87,14 +87,15 @@ OpenF1 live data requires a paid OpenF1 plan.
 
 ## Deploy to a server
 
-Debian/Ubuntu with Python 3.10+ and SSH access. About 300 MB of free RAM is enough: a race takes
-~70 MB in memory, ~250 MB peak while loading.
+Debian/Ubuntu with Python 3.10+ and SSH access. About 200 MB of free RAM is enough: a race takes
+~110 MB in memory, ~130 MB peak while loading, and ~7 MB of disk cache (car positions and
+telemetry are stored as compressed columns, not raw JSON).
 
 ```bash
 ./deploy/deploy.sh root@1.2.3.4      # port 8765; run again to update
 ```
 
 The script installs `requirements-live.txt`, creates the `f1live` user and the `f1-live`
-systemd service (restart on failure, 450 MB memory limit), and generates an access token. It
+systemd service (restart on failure, 300 MB memory limit), and generates an access token. It
 then prints `http://IP:8765/?token=…`. After the first visit the token is kept in a cookie;
 without it the server answers 401.

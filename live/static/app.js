@@ -29,6 +29,7 @@ function connect(delay = 500) {
     setTimeout(() => connect(Math.min(delay * 2, 10000)), delay);
   };
   ws.onmessage = (e) => {
+    poke();
     const m = JSON.parse(e.data);
     if (m.type === 'hello') {
       if (build && build !== m.build) location.reload();
@@ -1012,11 +1013,24 @@ function updateGauge() {
   gauge.mode.classList.toggle('on', on);
 }
 
+// Карту незачем рисовать 60 раз в секунду, когда она скрыта (другая вкладка) или
+// повтор на паузе: тогда кадр — только вскоре после данных или действий пользователя
+// (плавная камера и наведение успевают доехать).
+let activeUntil = 0;
+function poke() { activeUntil = performance.now() + 800; }
+for (const ev of ['pointerdown', 'pointermove', 'wheel', 'keydown', 'resize']) {
+  window.addEventListener(ev, poke, { passive: true });
+}
+
 let lastFrame = performance.now();
 function frame(now) {
   const dt = Math.min(250, now - lastFrame);
   lastFrame = now;
   if (feedEst != null && isPlaying()) feedEst += dt * playSpeed();
+  if (canvas.offsetParent === null || !(isPlaying() || now < activeUntil)) {
+    requestAnimationFrame(frame);
+    return;
+  }
 
   const dpr = window.devicePixelRatio || 1;
   const w = canvas.clientWidth, h = canvas.clientHeight;

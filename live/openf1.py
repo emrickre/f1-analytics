@@ -11,14 +11,18 @@ live-доступ у OpenF1 платный. Источник отдаёт лен
 """
 
 import bisect
+import heapq
 import json
 import logging
 import math
 import re
+import sys
 import time
 import urllib.error
 import urllib.parse
+import zlib
 from array import array
+from itertools import accumulate, chain
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -154,9 +158,67 @@ def reconcile_stints(stints, pit, laps):
     return out
 
 
+# --- компактный кеш длинных рядов -------------------------------------------------
+#
+# Координаты (/location, ~23 тыс. строк на машину за гонку) и телеметрия (/car_data)
+# в JSON занимают 3–6 МБ на машину, а при чтении разворачиваются в сотни тысяч
+# словарей. На диске храним только нужные столбцы: разности соседних значений
+# (int64, little-endian), сжатые zlib, — в 20–30 раз меньше и читается без словарей.
+
+SERIES_MAGIC = b'F1S1'
+
+
+def write_series(path, cols):
+    """cols: {имя: целые одной длины} → файл (атомарно, через временный)."""
+    names = list(cols)
+    n = len(cols[names[0]]) if names else 0
+    head = json.dumps({'n': n, 'cols': names}).encode()
+    body = bytearray()
+    for name in names:
+        a = array('q', cols[name])
+        d = array('q', (cur - prev for prev, cur in zip(chain((0,), a), a)))
+        if sys.byteorder == 'big':
+            d.byteswap()
+        body += d.tobytes()
+    tmp = path.with_name(path.name + '.tmp')
+    tmp.write_bytes(SERIES_MAGIC + len(head).to_bytes(4, 'little') + head
+                    + zlib.compress(bytes(body), 6))
+    tmp.replace(path)
+
+
+def read_series(path):
+    """→ {имя: array('q')} (см. write_series)."""
+    raw = path.read_bytes()
+    if raw[:4] != SERIES_MAGIC:
+        raise ValueError(f'{path}: не файл рядов')
+    k = int.from_bytes(raw[4:8], 'little')
+    head = json.loads(raw[8:8 + k])
+    body = zlib.decompress(raw[8 + k:])
+    n, out = head['n'], {}
+    for i, name in enumerate(head['cols']):
+        d = array('q')
+        d.frombytes(body[i * 8 * n:(i + 1) * 8 * n])
+        if sys.byteorder == 'big':
+            d.byteswap()
+        out[name] = array('q', accumulate(d))
+    return out
+
+
 class CarData:
     """Телеметрия машины в массивах: t_ms, speed, rpm, gear, throttle, brake, drs."""
     __slots__ = ('t', 'speed', 'rpm', 'gear', 'throttle', 'brake', 'drs')
+    TYPES = {'t': 'q', 'speed': 'H', 'rpm': 'H', 'gear': 'b', 'throttle': 'h',
+             'brake': 'h', 'drs': 'b'}
+
+    @classmethod
+    def from_columns(cls, cols):
+        cd = cls.__new__(cls)
+        for name, code in cls.TYPES.items():
+            setattr(cd, name, array(code, cols[name]))
+        return cd
+
+    def columns(self):
+        return {name: getattr(self, name) for name in self.TYPES}
 
     def __init__(self, rows):
         self.t = array('q', (int(ts_of(r['date']).timestamp() * 1000) for r in rows))
@@ -282,14 +344,37 @@ class OpenF1Source:
         for i, drv in enumerate(d['drivers'], 1):
             num = drv['driver_number']
             self.on_progress(f"car positions {i}/{len(d['drivers'])}")
-            rows = self._get('location', c(f'location_{num}'), session_key=key,
-                             driver_number=num,
-                             **{'date>': start.isoformat().replace('+00:00', ''),
-                                'date<': stop.isoformat().replace('+00:00', '')})
-            d['location'][str(num)] = compact_locations(rows)
-            log.info('  location #%-3s %6d', num, len(rows))
-            del rows
+            cols = self._series(
+                cdir, f'location_{num}',
+                lambda cache: dict(zip('txy', compact_locations(self._get(
+                    'location', cache, session_key=key, driver_number=num,
+                    **{'date>': start.isoformat().replace('+00:00', ''),
+                       'date<': stop.isoformat().replace('+00:00', '')})))))
+            d['location'][str(num)] = (cols['t'], array('l', cols['x']), array('l', cols['y']))
+            log.info('  location #%-3s %6d', num, len(cols['t']))
         return d
+
+    def _series(self, cdir, name, fetch):
+        """Ряд из компактного кеша `name.bin`; иначе fetch(json_cache) → столбцы.
+
+        Старый кеш в JSON (до компактного формата) конвертируется и удаляется.
+        Без cdir (сессия не завершена) — только fetch(None), без записи на диск.
+        """
+        if cdir is None:
+            return fetch(None)
+        path, old = cdir / f'{name}.bin', cdir / f'{name}.json'
+        if path.exists():
+            try:
+                cols = read_series(path)
+                old.unlink(missing_ok=True)       # остаток старого формата
+                return cols
+            except (OSError, ValueError, zlib.error):
+                log.warning('%s повреждён — загружаю заново', path)
+        cols = fetch(old if old.exists() else None)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        write_series(path, cols)
+        old.unlink(missing_ok=True)
+        return cols
 
     # --- преобразование в ленту событий F1 --------------------------------
 
@@ -391,11 +476,20 @@ class OpenF1Source:
             add(max(t_out, t_in + timedelta(seconds=1)), 'TimingData',
                 {'Lines': {n: {'InPit': False}}})
 
-        # Отрывы в гонке
-        for iv in d['intervals']:
-            add(ts_of(iv['date']), 'TimingData', {'Lines': {str(iv['driver_number']): {
+        # Отрывы в гонке: OpenF1 шлёт их по машине раз в ~4 с, пачками. Строки одной
+        # секунды — одним патчем (25 тыс. событий за гонку → ~5.6 тыс.), время — по
+        # последней строке, чтобы значение не появлялось раньше, чем было известно.
+        group, sec = {}, None
+        for iv in sorted(d['intervals'], key=lambda r: r['date']):
+            if iv['date'][:19] != sec and group:
+                add(t_last, 'TimingData', {'Lines': group})
+                group = {}
+            sec, t_last = iv['date'][:19], ts_of(iv['date'])
+            group[str(iv['driver_number'])] = {
                 'GapToLeader': fmt_gap(iv.get('gap_to_leader')),
-                'IntervalToPositionAhead': {'Value': fmt_gap(iv.get('interval'))}}}})
+                'IntervalToPositionAhead': {'Value': fmt_gap(iv.get('interval'))}}
+        if group:
+            add(t_last, 'TimingData', {'Lines': group})
 
         OpenF1Source._laps(d, ev, is_race, t_start)
         OpenF1Source._locations(d, ev)
@@ -533,19 +627,27 @@ class OpenF1Source:
     def _locations(d, ev):
         """Координаты машин → кадры Position с шагом POS_BUCKET."""
         bucket_ms = int(POS_BUCKET * 1000)
-        frames = {}
-        for num, (ts, xs, ys) in d['location'].items():
-            for t, x, y in zip(ts, xs, ys):
-                frames.setdefault(t // bucket_ms, []).append((num, x, y, t))
-        for b in sorted(frames):
-            items = frames.pop(b)
-            vals = array('q')
-            for _, x, y, t in items:
-                vals.extend((x, y, t))
+
+        def frame(b, nums, vals):
             # Компактный кадр вместо dict'ов: ~10 МБ на гонку вместо ~200.
             ev.append((datetime.fromtimestamp(b * bucket_ms / 1000, timezone.utc),
-                       'Position', PosFrame(b * bucket_ms,
-                                            tuple(i[0] for i in items), vals)))
+                       'Position', PosFrame(b * bucket_ms, tuple(nums), vals)))
+
+        # Ряды машин уже по времени — сливаем их потоком, без промежуточной
+        # таблицы на сотни тысяч точек.
+        streams = [((t, num, x, y) for t, x, y in zip(ts, xs, ys))
+                   for num, (ts, xs, ys) in d['location'].items()]
+        cur, nums, vals = None, [], array('q')
+        for t, num, x, y in heapq.merge(*streams):
+            b = t // bucket_ms
+            if b != cur and nums:
+                frame(cur, nums, vals)
+                nums, vals = [], array('q')
+            cur = b
+            nums.append(num)
+            vals.extend((x, y, t))
+        if nums:
+            frame(cur, nums, vals)
 
     @staticmethod
     def fastest_lap_outline(d):
@@ -609,10 +711,13 @@ class OpenF1Source:
 
     def car_data(self, session_key, num, finished=True):
         """Телеметрия одной машины за сессию (скорость, обороты, газ…) — компактно."""
-        cache = self.cache_dir / str(session_key) / f'car_{num}.json' if finished else None
-        rows = self._get('car_data', cache, session_key=session_key, driver_number=num)
-        rows.sort(key=lambda r: r['date'])
-        return CarData(rows)
+        def fetch(cache):
+            rows = self._get('car_data', cache, session_key=session_key, driver_number=num)
+            rows.sort(key=lambda r: r['date'])
+            return CarData(rows).columns()
+
+        cdir = self.cache_dir / str(session_key) if finished else None
+        return CarData.from_columns(self._series(cdir, f'car_{num}', fetch))
 
 
 class OpenF1Locked(RuntimeError):

@@ -4,9 +4,11 @@ import asyncio
 import json
 import unittest
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 from live.decode import decode_z, encode_z
 from live.openf1 import (CarData, OpenF1Source, compact_locations, meeting_title,
+                         read_series, write_series,
                          normalize_pits, reconcile_stints)
 from live.player import Player, Timeline
 from live.server import LiveServer
@@ -390,6 +392,72 @@ class OpenF1Test(unittest.TestCase):
                  if topic == 'TimingData' and 'InPit' in data.get('Lines', {}).get('1', {})]
         self.assertEqual([(int((t - datetime.fromisoformat(T(0))).total_seconds()), v)
                           for t, v in inpit], [(90, True), (1290, False)])
+
+
+    def test_intervals_grouped_by_second(self):
+        T = lambda s: (datetime(2026, 10, 3, 8, tzinfo=timezone.utc)
+                       + timedelta(seconds=s)).isoformat()
+        d = {'session': {'session_key': 1, 'session_type': 'Race', 'session_name': 'Race',
+                         'date_start': T(0), 'date_end': T(3600), 'circuit_key': 1,
+                         'circuit_short_name': 'X', 'location': 'X', 'year': 2026},
+             'meeting': {'meeting_name': 'Test GP'},
+             'drivers': [{'driver_number': n, 'name_acronym': f'D{n}', 'team_colour': '888888'}
+                         for n in (1, 2, 3)],
+             'laps': [], 'stints': [], 'weather': [], 'position': [], 'race_control': [],
+             'location': {}, 'pit': [],
+             'intervals': [{'date': T(10.2), 'driver_number': 2, 'gap_to_leader': 1.5, 'interval': 1.5},
+                           {'date': T(10.7), 'driver_number': 3, 'gap_to_leader': 3.0, 'interval': 1.5},
+                           {'date': T(10.9), 'driver_number': 2, 'gap_to_leader': 1.6, 'interval': 1.6},
+                           {'date': T(14.0), 'driver_number': 2, 'gap_to_leader': 1.8, 'interval': 1.8}]}
+        gaps = [(round((t - datetime.fromisoformat(T(0))).total_seconds(), 1),
+                 {n: v['GapToLeader'] for n, v in data['Lines'].items()})
+                for t, topic, data in OpenF1Source.timeline(d)
+                if topic == 'TimingData' and any('GapToLeader' in v for v in data['Lines'].values())]
+        # одна секунда — один патч, время по последней строке, последнее значение пилота
+        self.assertEqual(gaps, [(10.9, {'2': '+1.600', '3': '+3.000'}), (14.0, {'2': '+1.800'})])
+
+
+class SeriesCacheTest(unittest.TestCase):
+    def setUp(self):
+        import tempfile
+        self.dir = Path(tempfile.mkdtemp())
+
+    def test_roundtrip(self):
+        cols = {'t': [1_780_000_000_000, 1_780_000_000_270, 1_780_000_000_540],
+                'x': [-3, 1536, -2_000_000], 'y': [0, 0, 7]}
+        write_series(self.dir / 'a.bin', cols)
+        back = read_series(self.dir / 'a.bin')
+        self.assertEqual({k: list(v) for k, v in back.items()}, cols)
+        write_series(self.dir / 'e.bin', {'t': []})
+        self.assertEqual(list(read_series(self.dir / 'e.bin')['t']), [])
+
+    def test_old_json_converted_once(self):
+        src = OpenF1Source(cache_dir=self.dir)
+        old = self.dir / 'location_1.json'
+        old.write_text(json.dumps([{'date': '2026-10-03T08:00:01+00:00', 'x': 5, 'y': 6},
+                                   {'date': '2026-10-03T08:00:00+00:00', 'x': 1, 'y': 2}]))
+        calls = []
+
+        def fetch(cache):
+            calls.append(cache)
+            return dict(zip('txy', compact_locations(src._get('location', cache))))
+
+        cols = src._series(self.dir, 'location_1', fetch)
+        self.assertEqual((list(cols['x']), list(cols['y'])), ([1, 5], [2, 6]))
+        self.assertFalse(old.exists())                       # JSON заменён на .bin
+        self.assertTrue((self.dir / 'location_1.bin').exists())
+        src._series(self.dir, 'location_1', fetch)
+        self.assertEqual(calls, [old])                       # второй раз — из .bin
+        (self.dir / 'location_1.bin').write_bytes(b'junk')   # повреждён — загрузить заново
+        self.assertRaises(Exception, src._series, self.dir, 'location_1', lambda c: 1 / 0)
+
+    def test_car_data_columns(self):
+        rows = [{'date': '2026-10-03T08:00:00+00:00', 'speed': 300, 'rpm': 11000, 'n_gear': 8,
+                 'throttle': 100, 'brake': 0, 'drs': None}]
+        cd = CarData(rows)
+        write_series(self.dir / 'car.bin', cd.columns())
+        back = CarData.from_columns(read_series(self.dir / 'car.bin'))
+        self.assertEqual(back.window(0, 10 ** 13), cd.window(0, 10 ** 13))
 
 
 class OpenF1LockedTest(unittest.TestCase):
