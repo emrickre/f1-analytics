@@ -13,6 +13,7 @@ recordings/
 data/*
 !data/laps_2026.parquet
 !data/laps_2026_practice.parquet
+!data/results_2026.parquet
 
 # plots saved by main.py
 figures/

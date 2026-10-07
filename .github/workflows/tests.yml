@@ -53,6 +53,7 @@ jobs:
           jupyter nbconvert --to notebook --execute --output /tmp/degradation.ipynb tyre_degradation.ipynb
           jupyter nbconvert --to notebook --execute --output /tmp/undercut.ipynb undercut.ipynb
           jupyter nbconvert --to notebook --execute --output /tmp/strategy_sim.ipynb strategy_sim.ipynb
+          jupyter nbconvert --to notebook --execute --output /tmp/race_prediction.ipynb race_prediction.ipynb
 
   frontend:
     name: Frontend syntax

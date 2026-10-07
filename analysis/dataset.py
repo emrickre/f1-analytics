@@ -9,6 +9,7 @@
 
     python -m analysis.dataset 2026                     # → data/laps_2026.parquet
     python -m analysis.dataset 2026 --session practice  # → data/laps_2026_practice.parquet
+    python -m analysis.dataset 2026 --session results   # → data/results_2026.parquet
 """
 
 import argparse
@@ -185,17 +186,74 @@ def build_laps(year, sessions=('Race',), src=None):
     return df
 
 
+def build_results(year, src=None):
+    """Итоги уикендов: стартовая решётка, квалификация и результат гонки.
+
+    Строка = пилот × гонка: grid (официальная стартовая позиция, со штрафами),
+    quali_pos и quali_time (лучший круг квалификации, с), quali_gap (отставание
+    от поула, %), finish (место; NaN — не классифицирован), status
+    (finished / nc — доехал, но не классифицирован / dnf / dns / dsq), points, laps.
+    """
+    src = src or OpenF1Source()
+    races = {(s['meeting'], s['location']): s for s in catalog(year)
+             if s['name'] == 'Race' and s['available']}
+    quali = {(s['meeting'], s['location']): s for s in catalog(year)
+             if s['name'] == 'Qualifying' and s['available']}
+    laps = pd.read_parquet(DATA_DIR / f'laps_{year}.parquet', columns=['race', 'location', 'round'])
+    weekends = laps.drop_duplicates('race').sort_values('round')
+    rows = []
+    for w in weekends.itertuples():
+        r = next(v for (m, loc), v in races.items() if loc == w.location)
+        q = next(v for (m, loc), v in quali.items() if loc == w.location)
+        cdir = lambda k: src.cache_dir / str(k)          # noqa: E731
+        res = src._get('session_result', cdir(r['key']) / 'session_result.json', session_key=r['key'])
+        qres = src._get('session_result', cdir(q['key']) / 'session_result.json', session_key=q['key'])
+        grid = src._get('starting_grid', cdir(q['key']) / 'starting_grid.json', session_key=q['key'])
+        drivers = {d['driver_number']: d for d in
+                   src._get('drivers', cdir(r['key']) / 'drivers.json', session_key=r['key'])}
+        gpos = {g['driver_number']: g['position'] for g in grid}
+        qbest = {x['driver_number']: min((t for t in (x.get('duration') or []) if t), default=None)
+                 for x in qres}
+        qpos = {x['driver_number']: x.get('position') for x in qres}
+        pole = min((t for t in qbest.values() if t), default=None)
+        log.info('%2d %s: %d results, grid %d', w.round, w.race, len(res), len(grid))
+        for x in res:
+            n = x['driver_number']
+            status = ('dsq' if x.get('dsq') else 'dns' if x.get('dns')
+                      else 'dnf' if x.get('dnf')
+                      # доехал, но меньше 90 % дистанции — не классифицирован
+                      else 'nc' if x.get('position') is None else 'finished')
+            rows.append({
+                'year': year, 'round': w.round, 'race': w.race, 'driver_number': n,
+                'driver': drivers.get(n, {}).get('name_acronym'),
+                'team': drivers.get(n, {}).get('team_name'),
+                'grid': gpos.get(n), 'quali_pos': qpos.get(n), 'quali_time': qbest.get(n),
+                'quali_gap': (qbest[n] / pole - 1) * 100 if qbest.get(n) and pole else None,
+                'finish': x.get('position') if status == 'finished' else None,
+                'status': status, 'points': x.get('points') or 0.0,
+                'laps': x.get('number_of_laps'),
+            })
+    return pd.DataFrame(rows)
+
+
 def main():
     p = argparse.ArgumentParser(description='Собрать датасет кругов сезона из OpenF1')
     p.add_argument('year', type=int)
     p.add_argument('--session', default='Race',
-                   help='Race, Sprint или practice (FP1–FP3 и спринт — всё, что видно до гонки)')
+                   help='Race, Sprint, practice (FP1–FP3 и спринт — всё, что видно до гонки) '
+                        'или results (решётка, квалификация, итог гонки)')
     a = p.parse_args()
     logging.basicConfig(level=logging.INFO, format='%(asctime)s %(message)s',
                         datefmt='%H:%M:%S')
+    DATA_DIR.mkdir(exist_ok=True)
+    if a.session == 'results':
+        df = build_results(a.year)
+        path = DATA_DIR / f'results_{a.year}.parquet'
+        df.to_parquet(path, index=False)
+        log.info('%d строк, %d гонок → %s', len(df), df['race'].nunique(), path)
+        return
     sessions = PRACTICE if a.session == 'practice' else (a.session,)
     df = build_laps(a.year, sessions)
-    DATA_DIR.mkdir(exist_ok=True)
     path = DATA_DIR / f'laps_{a.year}{"" if a.session == "Race" else "_" + a.session.lower()}.parquet'
     df.to_parquet(path, index=False)
     log.info('%d кругов, %d сессий → %s', len(df), df['session_key'].nunique(), path)

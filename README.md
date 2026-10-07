@@ -41,7 +41,8 @@ the same license (see [License](#license)). OpenF1's stint table does not always
 stops (shifted by a lap in some races, missing stops in others), so tyre stints are rebuilt from the
 pit stops, with each stop lap checked against the pit-exit time.
 Practice and sprint laps of the same weekends (21,776 laps from 43 sessions) are in
-[`data/laps_2026_practice.parquet`](data/laps_2026_practice.parquet).
+[`data/laps_2026_practice.parquet`](data/laps_2026_practice.parquet). Starting grids, qualifying
+laps and race classifications are in [`data/results_2026.parquet`](data/results_2026.parquet).
 
 ## Method
 
@@ -77,6 +78,7 @@ the API (about 3 min; OpenF1 is closed to free users while a session is live):
 ```bash
 python -m analysis.dataset 2026
 python -m analysis.dataset 2026 --session practice   # FP1–FP3 and sprints
+python -m analysis.dataset 2026 --session results    # grids, qualifying, classifications
 ```
 
 Tests: `python -m unittest discover tests`
@@ -123,6 +125,24 @@ lost against a hindsight plan falls from 12.7 s to 4.7 s. Monaco is the exceptio
 a green track mistook track grip for tyre life.
 
 ![Tyre wear in practice vs the race, and the pre-race plan](docs/practice_plan.png)
+
+## Fourth study: predicting the race result
+
+📓 **[notebooks/race_prediction.ipynb](notebooks/race_prediction.ipynb)**: what is known before the
+start (grid, qualifying gap, team form, practice pace, reliability), and does it beat the grid? Every
+race is forecast only from earlier races.
+
+- **The grid is hard to beat.** Adding the qualifying gap and team form lifts the rank correlation
+  with the result from 0.80 to 0.82 (mean error 2.07 → 2.01 places), better in only 5 of 13 races.
+  Practice long-run pace adds nothing once these are known.
+- **Reliability follows the team.** In 2026, 20 % of starters do not finish, from 3 % at Racing
+  Bulls to 53 % at Aston Martin. A team's record forecasts retirements 8 % better than a flat rate
+  from race 8 on.
+- **Points chances are where the model pays off.** Its Monte Carlo probabilities beat the grid's by
+  4.7 % log loss for a points finish (better in 9 of 13 races, bootstrap interval excludes zero) and
+  are calibrated. The gains for podium and win are within noise.
+
+![Calibration and points-finish forecast by race](docs/race_prediction.png)
 
 ## Also in this repo
 

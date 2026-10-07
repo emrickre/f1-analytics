@@ -15,6 +15,7 @@ from analysis import strategy as S
 from analysis import undercut as U
 from analysis import simulate as X
 from analysis import practice as F
+from analysis import predict as P
 
 T0 = pd.Timestamp('2026-07-05T14:00:00Z')
 
@@ -336,6 +337,52 @@ class PracticeTest(unittest.TestCase):
         cb = F.combine(practice[practice.race != 'R0'], race_deg).set_index('race')
         self.assertEqual(cb.loc['R0', 'post'], cb.loc['R0', 'prior'])
         self.assertEqual(cb.loc['R0', 'weight'], 0.0)
+
+
+class PredictTest(unittest.TestCase):
+    def results(self, races=6, noise=0.0, seed=0):
+        """Сезон, где финиш = стартовая позиция (+ шум); команда «X» сходит каждую гонку."""
+        rng = np.random.default_rng(seed)
+        rows = []
+        for rd in range(1, races + 1):
+            for g in range(1, 11):
+                team = 'X' if g == 10 else f'T{(g + 1) // 2}'
+                rows.append({'round': rd, 'race': f'R{rd}', 'driver_number': g, 'driver': f'D{g}',
+                             'team': team, 'grid': g, 'quali_gap': 0.1 * g,
+                             'status': 'dnf' if team == 'X' else 'finished'})
+        d = pd.DataFrame(rows)
+        d['finish'] = np.where(d['status'] == 'finished', d['grid'] + rng.normal(0, noise, len(d)), np.nan)
+        d.loc[d['status'] == 'finished', 'finish'] = (
+            d[d['status'] == 'finished'].groupby('round')['finish'].rank())
+        return d
+
+    def test_form_uses_only_past_races(self):
+        d = P.add_form(self.results())
+        self.assertTrue(d.loc[d['round'] == 1, 'form_team'].isna().all())
+        r2 = d[(d['round'] == 2) & (d['driver_number'] == 3)].iloc[0]
+        self.assertEqual(r2['form_driver'], 3.0)                 # только гонка 1
+        self.assertEqual(r2['form_team'], 3.5)                   # T2 = пилоты 3 и 4
+
+    def test_reliability_shrinks_to_season(self):
+        d = self.results(races=4)
+        p = P.reliability(d, pd.Series(['X', 'T1', 'NEW']), a=10)
+        p0 = 0.1
+        self.assertAlmostEqual(p[0], (4 + 10 * p0) / (4 + 10))   # 4 схода из 4 стартов
+        self.assertAlmostEqual(p[1], (0 + 10 * p0) / (8 + 10))
+        self.assertAlmostEqual(p[2], p0)                         # новой команды нет в истории
+
+    def test_grid_model_is_perfect_when_finish_equals_grid(self):
+        r = P.rolling_ranks(self.results(), {'grid': 'grid'})
+        self.assertTrue((r['rho'] > 0.999).all())
+        self.assertTrue(r['winner'].all())
+        self.assertEqual(set(r['round']), {4, 5, 6})
+
+    def test_simulate(self):
+        sim = P.simulate([1.0, 2.0, 3.0], sigma=1e-6, p_out=[0.0, 0.0, 1.0], n=200)
+        self.assertEqual(list(sim['win']), [1.0, 0.0, 0.0])
+        self.assertEqual(list(sim['podium']), [1.0, 1.0, 0.0])   # сошедший не на подиуме
+        sim = P.simulate([0.0] * 4, sigma=1.0, p_out=[0.0] * 4, n=20000, seed=1)
+        self.assertTrue(np.allclose(sim['win'], 0.25, atol=0.02))
 
 
 if __name__ == '__main__':
