@@ -13,6 +13,8 @@ from analysis.dataset import build_session_laps, neutralisations
 from analysis import model as M
 from analysis import strategy as S
 from analysis import undercut as U
+from analysis import simulate as X
+from analysis import practice as F
 
 T0 = pd.Timestamp('2026-07-05T14:00:00Z')
 
@@ -231,6 +233,99 @@ class UndercutTest(unittest.TestCase):
 
     def test_gap_limit(self):
         self.assertTrue(U.pit_pairs(duel_race(), max_gap=1.0).empty)
+
+
+class SimulateTest(unittest.TestCase):
+    params = {'offset': {'MEDIUM': 0.0, 'HARD': 0.3}, 'deg': {'MEDIUM': 0.10, 'HARD': 0.05}}
+
+    def test_events_from_laps(self):
+        rows = [{'race': 'R', 'total_laps': 10, 'lap_number': l, 'driver_number': d,
+                 'neutralised': 'SC' if 3 <= l <= 5 else ('VSC' if l == 8 else None)}
+                for l in range(1, 11) for d in (1, 2)]
+        ev = X.neutralisation_events(pd.DataFrame(rows))
+        self.assertEqual(ev[['kind', 'start', 'end', 'laps']].values.tolist(),
+                         [['SC', 3, 5, 3], ['VSC', 8, 8, 1]])
+
+    def test_scenarios_rate(self):
+        model = {'p': 0.05, 'share_sc': 0.5, 'durations': {'SC': np.array([3]), 'VSC': np.array([2])}}
+        sc = X.sample_scenarios(model, 60, 3000, seed=0)
+        starts = ((sc[:, 1:] != 0) & (sc[:, :-1] == 0)).sum(1) + (sc[:, 0] != 0)
+        # ~ 0.05 на «зелёный» круг: при средней длине 2.5 круга ≈ 2.6 эпизода на 60 кругов
+        self.assertAlmostEqual(starts.mean(), 60 / (1 / 0.05 + 2.5), delta=0.25)
+        self.assertTrue(set(np.unique(sc)) <= {0, 1, 2})
+
+    def test_no_neutralisation_equals_deterministic(self):
+        one, two, det = X.best_plans(self.params, 50, loss=20.0)
+        green = np.zeros((3, 50), dtype=np.int8)
+        ratio = {'GREEN': 1.0, 'SC': 0.5, 'VSC': 0.8}
+        for plan in (one, two):
+            for pol in ('fixed', 'react'):
+                t = X.race_times(self.params, 50, plan, green, 20.0, ratio, policy=pol)
+                self.assertTrue(np.allclose(t, det[plan]))
+
+    def test_react_takes_cheap_stop_under_sc(self):
+        plan = X.Plan('MEDIUM', ((20, 'HARD'),))
+        scen = np.zeros(50, dtype=np.int8)
+        scen[17:21] = 1                       # SC с 18-го круга, стоп запланирован на 20-м
+        cost = np.array([20.0, 10.0, 16.0])
+        stops = X.react(plan, scen, 50, self.params, cost, {1: 4, 2: 3})
+        self.assertEqual(stops, ((20, 'HARD'),))   # стоп и так под SC — ничего не меняем
+        scen = np.zeros(50, dtype=np.int8)
+        scen[13:17] = 1                       # SC с 14-го: перенести стоп выгоднее
+        stops = X.react(plan, scen, 50, self.params, cost, {1: 4, 2: 3})
+        self.assertEqual(stops[0][0], 14)
+
+
+class PracticeTest(unittest.TestCase):
+    FUEL = 0.05
+
+    def practice_laps(self, deg, seed=0):
+        """Уикенд «R»: 8 отрезков по 10 кругов + быстрый круг и круг охлаждения в каждом."""
+        rng = np.random.default_rng(seed)
+        rows = []
+        for run in range(8):
+            comp = 'MEDIUM' if run % 2 else 'HARD'
+            base = 90 + rng.normal(0, 0.5)               # топливо, режим мотора — у каждого свой
+            times = [base + deg[comp] * a - self.FUEL * a + rng.normal(0, 0.03) for a in range(10)]
+            times = [base - 2.5] + times + [base * 1.3]  # попытка на круг и охлаждение
+            for i, t in enumerate(times):
+                rows.append({'race': 'R', 'session': 'Practice 2', 'session_key': 1,
+                             'driver_number': run, 'driver': f'D{run}', 'stint': 1,
+                             'lap_number': i + 1, 'lap_time': t, 'compound': comp,
+                             'tyre_age': i, 'is_in_lap': False, 'is_pit_out_lap': False,
+                             'neutralised': None, 'yellow': False, 'rainfall': 0})
+        return pd.DataFrame(rows)
+
+    def test_long_runs_drop_push_and_cooldown_laps(self):
+        runs = F.long_runs(self.practice_laps({'HARD': 0.04, 'MEDIUM': 0.08}), self.FUEL)
+        self.assertEqual(runs['run'].nunique(), 8)
+        self.assertEqual(len(runs), 80)
+        self.assertEqual(runs.groupby('run')['run_lap'].max().tolist(), [9] * 8)
+
+    def test_practice_deg_recovers_wear_net_of_fuel(self):
+        runs = F.long_runs(self.practice_laps({'HARD': 0.04, 'MEDIUM': 0.08}), self.FUEL)
+        pr = F.practice_deg(runs).set_index('compound')
+        self.assertAlmostEqual(pr.loc['HARD', 'deg'], 0.04, delta=0.01)
+        self.assertAlmostEqual(pr.loc['MEDIUM', 'deg'], 0.08, delta=0.01)
+        self.assertEqual(pr.loc['HARD', 'runs'], 4)
+
+    def test_combine_uses_only_other_races(self):
+        races = [f'R{i}' for i in range(6)]
+        true = dict(zip(races, [0.02, 0.05, 0.08, 0.11, 0.14, 0.17]))
+        race_deg = pd.DataFrame({'race': races, 'compound': 'MEDIUM',
+                                 'deg_s_per_lap': [true[r] for r in races]})
+        # практика ровно на 0.03 выше гонки и очень точная → прогноз почти равен гонке
+        practice = pd.DataFrame({'race': races, 'compound': 'MEDIUM',
+                                 'deg': [true[r] + 0.03 for r in races], 'se': 0.001})
+        cb = F.combine(practice, race_deg).set_index('race')
+        for r in races:
+            self.assertAlmostEqual(cb.loc[r, 'post'], true[r], delta=0.002)
+            self.assertAlmostEqual(cb.loc[r, 'prior'],
+                                   np.median([true[o] for o in races if o != r]))
+        # без практики — медиана остальных гонок
+        cb = F.combine(practice[practice.race != 'R0'], race_deg).set_index('race')
+        self.assertEqual(cb.loc['R0', 'post'], cb.loc['R0', 'prior'])
+        self.assertEqual(cb.loc['R0', 'weight'], 0.0)
 
 
 if __name__ == '__main__':

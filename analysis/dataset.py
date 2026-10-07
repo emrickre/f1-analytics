@@ -7,7 +7,8 @@
 Загрузка и дисковый кеш — те же, что у live-таймингов (live/openf1.py),
 поэтому повторная сборка идёт без сети.
 
-    python -m analysis.dataset 2026            # → data/laps_2026.parquet
+    python -m analysis.dataset 2026                     # → data/laps_2026.parquet
+    python -m analysis.dataset 2026 --session practice  # → data/laps_2026_practice.parquet
 """
 
 import argparse
@@ -23,6 +24,7 @@ log = logging.getLogger('analysis.dataset')
 
 DATA_DIR = Path(__file__).resolve().parent.parent / 'data'
 ENDPOINTS = ('drivers', 'laps', 'stints', 'pit', 'race_control', 'weather')
+PRACTICE = ('Practice 1', 'Practice 2', 'Practice 3', 'Sprint')
 
 
 # --- загрузка ---------------------------------------------------------------
@@ -154,22 +156,30 @@ def build_session_laps(raw, meta=None):
     return laps.drop(columns=['date_end'])
 
 
-def build_laps(year, session_name='Race', src=None):
-    """Все прошедшие гонки сезона → один DataFrame кругов."""
+def build_laps(year, sessions=('Race',), src=None):
+    """Все прошедшие сессии сезона с такими названиями → один DataFrame кругов.
+
+    Номер этапа и название — по гонке уикенда, чтобы круги практик совпадали с
+    кругами гонки по `race` и `round`.
+    """
     src = src or OpenF1Source()
-    season = [s for s in catalog(year) if s['name'] == session_name]
-    sessions = [s for s in season if s['available']]
+    races = [s for s in catalog(year) if s['name'] == 'Race']
     # Перенесённый этап сохраняет название: в 2026 «Bahrain Grand Prix» прошёл в
     # Куала-Лумпуре. Одинаковые названия в сезоне подписываем местом проведения.
-    names = [s['meeting'] for s in season]
+    names = [s['meeting'] for s in races]
     label = lambda s: (f"{s['meeting']} ({s['location']})"            # noqa: E731
                        if names.count(s['meeting']) > 1 else s['meeting'])
+    weekend = {(s['meeting'], s['location']): (round_no, label(s))
+               for round_no, s in enumerate((s for s in races if s['available']), 1)}
+    todo = [s for s in catalog(year) if s['name'] in sessions and s['available']
+            and (s['meeting'], s['location']) in weekend]
     frames = []
-    for round_no, s in enumerate(sessions, 1):
-        log.info('%2d/%d %s %s', round_no, len(sessions), label(s), s['name'])
+    for i, s in enumerate(todo, 1):
+        round_no, race = weekend[(s['meeting'], s['location'])]
+        log.info('%2d/%d %s %s', i, len(todo), race, s['name'])
         raw = fetch_session(s['key'], src)
         frames.append(build_session_laps(raw, meta={
-            'year': year, 'round': round_no, 'race': label(s),
+            'year': year, 'round': round_no, 'race': race,
             'location': s['location'], 'session': s['name']}))
     df = pd.concat([f for f in frames if not f.empty], ignore_index=True)
     return df
@@ -178,15 +188,17 @@ def build_laps(year, session_name='Race', src=None):
 def main():
     p = argparse.ArgumentParser(description='Собрать датасет кругов сезона из OpenF1')
     p.add_argument('year', type=int)
-    p.add_argument('--session', default='Race', help='Race или Sprint')
+    p.add_argument('--session', default='Race',
+                   help='Race, Sprint или practice (FP1–FP3 и спринт — всё, что видно до гонки)')
     a = p.parse_args()
     logging.basicConfig(level=logging.INFO, format='%(asctime)s %(message)s',
                         datefmt='%H:%M:%S')
-    df = build_laps(a.year, a.session)
+    sessions = PRACTICE if a.session == 'practice' else (a.session,)
+    df = build_laps(a.year, sessions)
     DATA_DIR.mkdir(exist_ok=True)
     path = DATA_DIR / f'laps_{a.year}{"" if a.session == "Race" else "_" + a.session.lower()}.parquet'
     df.to_parquet(path, index=False)
-    log.info('%d кругов, %d гонок → %s', len(df), df['session_key'].nunique(), path)
+    log.info('%d кругов, %d сессий → %s', len(df), df['session_key'].nunique(), path)
 
 
 if __name__ == '__main__':
