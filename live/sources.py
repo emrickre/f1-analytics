@@ -54,9 +54,18 @@ SSL_CTX = _ssl_context()
 
 
 def http_get(url, timeout=30):
+    """Тело ответа. timeout — предел на весь запрос: таймаут сокета ограничивает
+    только паузу между пакетами, а сервер под нагрузкой может отдавать ответ по
+    капле минутами (OpenF1 так делает)."""
     req = urllib.request.Request(url, headers=UA)
+    deadline = time.monotonic() + timeout
     with urllib.request.urlopen(req, timeout=timeout, context=SSL_CTX) as r:
-        return r.read()
+        parts = []
+        while chunk := r.read(1 << 16):
+            parts.append(chunk)
+            if time.monotonic() > deadline:
+                raise TimeoutError(f'{url[:80]}…: no full answer in {timeout} s')
+        return b''.join(parts)
 
 
 # --- live ------------------------------------------------------------------

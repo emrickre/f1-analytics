@@ -309,6 +309,16 @@ class PracticeTest(unittest.TestCase):
         self.assertAlmostEqual(pr.loc['MEDIUM', 'deg'], 0.08, delta=0.01)
         self.assertEqual(pr.loc['HARD', 'runs'], 4)
 
+    def test_live_wear_matches_analysis(self):
+        from live import practice as LP
+        runs = F.long_runs(self.practice_laps({'HARD': 0.04, 'MEDIUM': 0.08}, seed=2), self.FUEL)
+        pr = F.practice_deg(runs).set_index('compound')
+        live = LP.wear({k: list(zip(g['compound'], g['tyre_age'], g['lap_time_fc']))
+                        for k, g in runs.groupby('run')})
+        for c in ('HARD', 'MEDIUM'):
+            self.assertAlmostEqual(live[c]['deg'], pr.loc[c, 'deg'], places=10)
+            self.assertAlmostEqual(live[c]['se'], pr.loc[c, 'se'], places=10)
+
     def test_combine_uses_only_other_races(self):
         races = [f'R{i}' for i in range(6)]
         true = dict(zip(races, [0.02, 0.05, 0.08, 0.11, 0.14, 0.17]))

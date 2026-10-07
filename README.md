@@ -127,8 +127,9 @@ a green track mistook track grip for tyre life.
 ## Also in this repo
 
 - **Live timing web app** ([`live/`](live/README.md)): race replay with timing tower, track
-  map, car telemetry and an in-race strategy tab that learns tyre degradation from the laps
-  completed so far. `pip install -r requirements-live.txt && python -m live openf1`
+  map, car telemetry and an in-race strategy tab built on the studies above. It learns tyre
+  degradation from the laps completed so far and starts from a practice-based forecast. It shows
+  the Safety Car risk, and under a Safety Car or VSC it says whether to box now. `pip install -r requirements-live.txt && python -m live openf1`
 - **Session explorer** (`app.py`, `main.py`, `f1_data.py`, `plots.py`): a Tkinter app and CLI
   with lap times, fastest-lap telemetry, positions, tyre strategy and lap-time distribution for
   any session since 2023. Data comes from OpenF1 as FastF1-like tables, because FastF1's source

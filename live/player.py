@@ -6,6 +6,8 @@
 """
 
 import asyncio
+import bisect
+import heapq
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -21,6 +23,7 @@ class Timeline:
     outline: list | None = None         # готовый контур трассы, если есть
     title: str = ''
     meta: dict = field(default_factory=dict)
+    backfill: object = None             # догрузка в фоне (openf1.Backfill)
 
     @property
     def end(self):
@@ -39,6 +42,7 @@ class Player:
         self.speed = 1.0
         self.loading = None     # текст прогресса загрузки
         self.error = None
+        self.buffer = None      # что ещё догружается в фоне (текст) — играть уже можно
         self.version = 0
 
     # --- управление ------------------------------------------------------
@@ -51,7 +55,7 @@ class Player:
         self.idx, self.pos = 0, 0.0
         self.seek(tl.start - 30 + skip)
         self.playing = True
-        self.loading = self.error = None
+        self.loading = self.error = self.buffer = None
         self._changed()
 
     def play(self):
@@ -78,6 +82,30 @@ class Player:
             self.idx = 0
         self._apply_until(t)
         self.pos = t
+        self._changed()
+
+    def extend(self, new):
+        """Вставить догруженные события [(смещение, событие)] в ленту на их места.
+
+        Будущие проиграются в свой момент. Уже прошедшие применяются сразу (отрывы —
+        все по порядку, координаты — только последние ~2 с: старые кадры не нужны);
+        в ленте остаются все, поэтому перемотка назад видит полные данные.
+        """
+        if not (self.tl and new):
+            return
+        key = lambda e: e[0]  # noqa: E731
+        msgs, cut = self.tl.msgs, bisect.bisect_right(new, self.pos, key=key)
+        past, future = new[:cut], new[cut:]
+        head = list(heapq.merge(msgs[:self.idx], past, key=key))
+        self.tl.msgs = head + list(heapq.merge(msgs[self.idx:], future, key=key))
+        self.idx = len(head)
+        base = self.tl.base
+        for off, ev in past:
+            if ev.get('topic') == 'Position' and off < self.pos - 2:
+                continue
+            ts = (base + timedelta(seconds=off)).isoformat().replace('+00:00', 'Z') \
+                if base else ev.get('ts')
+            self.server.apply_event(ev, ts)
         self._changed()
 
     def seek_session(self, rel):
@@ -129,5 +157,6 @@ class Player:
             'speed': self.speed,
             'speeds': self.SPEEDS,
             'loading': self.loading,
+            'buffer': self.buffer,
             'error': self.error,
         }

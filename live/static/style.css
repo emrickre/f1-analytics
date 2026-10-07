@@ -352,6 +352,16 @@ td.sec { padding: 0 3px; }
 .deg-row .badge.evo { background: #1e3a5f; color: #b9dcff; }
 .m-loss { padding: 6px 14px; color: var(--muted); font-size: 13px; }
 .m-loss b { color: var(--text); }
+.pre-race { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; padding: 8px 0 2px;
+  border-top: 1px dashed #2c313c; font-size: 13px; font-variant-numeric: tabular-nums; }
+.pre-race > span:first-child { flex-basis: 100%; color: var(--muted); font-size: 11px; font-weight: 700;
+  letter-spacing: .06em; text-transform: uppercase; }
+.pre-race > span .tyre { margin-right: 4px; }
+.pre-race small { flex-basis: 100%; color: var(--muted); font-size: 11px; }
+.sc-risk { margin-top: 6px; }
+.sc-risk small { display: block; color: var(--dim); font-size: 11px; }
+.sc-risk.on { color: #1a1400; background: var(--yellow, #ffd23f); border-radius: 4px; padding: 4px 8px; }
+.sc-risk.on b { color: inherit; }
 .m-driver { margin: 6px 14px 0; padding: 12px; border-radius: 10px; background: #181b23;
   border: 1px solid var(--line-2); border-top: 3px solid var(--c, var(--f1)); }
 .m-driver h3 { margin: 0 0 6px; font-size: 18px; font-weight: 900; }
@@ -366,4 +376,6 @@ td.sec { padding: 0 3px; }
 .box-opt.fl { border-top: 1px dashed #2c313c; padding-top: 8px; }
 .box-opt.fl.no .tyre { opacity: .45; }
 .box-opt .gain.warn { color: var(--yellow, #ffd23f); }
+.box-opt.sc { border: 1px solid #5c4a00; border-radius: 6px; padding: 6px 8px; }
+.box-opt.sc.go { border-color: var(--yellow, #ffd23f); background: #ffd23f14; }
 .fine { color: var(--dim); font-size: 11px; line-height: 1.45; padding: 10px 14px 14px; margin: 0; }

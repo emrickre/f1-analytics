@@ -29,6 +29,7 @@ function connect(delay = 500) {
     setTimeout(() => connect(Math.min(delay * 2, 10000)), delay);
   };
   ws.onmessage = (e) => {
+    poke();
     const m = JSON.parse(e.data);
     if (m.type === 'hello') {
       if (build && build !== m.build) location.reload();
@@ -266,7 +267,8 @@ function onPlayback(m) {
   const status = $('pb-status');
   status.classList.toggle('err', !!m.error);
   status.textContent = m.error ? `Error: ${m.error}`
-    : m.loading ? `⏳ ${m.loading}` : live ? 'live feed' : (m.title || '');
+    : m.loading ? `⏳ ${m.loading}` : live ? 'live feed'
+    : (m.title || '') + (m.buffer ? ` · ⏳ ${m.buffer}` : '');
   $('ses-load').disabled = !!m.loading;
   if (live) return;
 
@@ -501,16 +503,32 @@ function renderModel() {
   const rows = order.filter((cpd) => strat.deg[cpd]).map((cpd) => {
     const d = strat.deg[cpd];
     const ci = d.se != null ? ` ± ${(1.96 * d.se).toFixed(3)}` : '';
-    const badge = !d.enough ? '<span class="badge">few laps</span>'
+    const pre = strat.preRace && strat.preRace.compounds[cpd];
+    const badge = !d.enough ? (pre ? '<span class="badge" title="Few race laps yet: pit windows use the practice forecast below">practice</span>'
+      : '<span class="badge">few laps</span>')
       : d.significant ? '<span class="badge ok">wear</span>'
       : d.improving ? '<span class="badge evo" title="Laps get faster: the track gains grip quicker than the tyres wear">track improving</span>'
       : '<span class="badge">no clear wear</span>';
     return `<div class="deg-row"><span class="tyre t-${cpd}">${cpd[0]}</span>
       <div><b>${d.deg >= 0 ? '+' : ''}${d.deg.toFixed(3)} s/lap</b><small>${cpd}${ci} · ${d.n} laps</small></div>${badge}</div>`;
   });
-  $('m-deg').innerHTML = rows.join('') || '<p class="fine">Waiting for clean laps…</p>';
+  const pr = strat.preRace;
+  const preHtml = pr ? `<div class="pre-race"><span>Before the race</span>${
+    order.filter((cpd) => pr.compounds[cpd]).map((cpd) => {
+      const p = pr.compounds[cpd];
+      const tip = p.practice == null ? 'no long runs: season median'
+        : `practice ${p.practice >= 0 ? '+' : ''}${p.practice.toFixed(3)} s/lap from ${p.runs} runs, weight ${Math.round(p.weight * 100)} %`;
+      return `<span title="${tip}"><span class="tyre t-${cpd}">${cpd[0]}</span>${p.deg >= 0 ? '+' : ''}${p.deg.toFixed(3)}</span>`;
+    }).join('')}<small>s/lap · ${pr.runs} long runs in ${pr.sessions.join(', ')}, blended with the season median</small></div>` : '';
+  $('m-deg').innerHTML = (rows.join('') || '<p class="fine">Waiting for clean laps…</p>') + preHtml;
+  const r = strat.scRisk;
+  const riskHtml = r ? `<div class="sc-risk${r.now ? ' on' : ''}">${r.now
+    ? `<b>${r.now === 'SC' ? 'Safety Car' : 'Virtual Safety Car'}</b> — a stop now costs ~${Math.round(r.ratio[r.now] * 100)} % of usual`
+    : `Safety Car or VSC before the flag: <b>${Math.round(r.rest * 100)} %</b><small>${
+      (r.perLap * 100).toFixed(0)} % per lap, 2026 season · a stop costs ~${Math.round(r.ratio.SC * 100)} % under SC, ~${
+      Math.round(r.ratio.VSC * 100)} % under VSC</small>`}</div>` : '';
   $('m-loss').innerHTML = `Pit stop costs <b>${strat.pitLoss.value.toFixed(1)} s</b> ${
-    strat.pitLoss.stops ? `(median of ${strat.pitLoss.stops} green-flag stops)` : '(default until first stops)'}`;
+    strat.pitLoss.stops ? `(median of ${strat.pitLoss.stops} green-flag stops)` : '(default until first stops)'}${riskHtml}`;
 
   // Пилот: выбранный, иначе лидер
   const lead = state && state.rows.length ? state.rows[0].num : null;
@@ -528,8 +546,10 @@ function renderModel() {
   const opts = w.options.length ? w.options.map((o) => {
     const good = o.gain > 0;
     const when = o.window[0] === o.window[1] ? `lap ${o.window[0]}` : `laps ${o.window[0]}–${o.window[1]}`;
+    const src = w.practice.includes(o.compound) || w.practice.includes(w.compound)
+      ? '<small>wear from practice until the race has enough laps</small>' : '';
     return `<div class="box-opt"><span class="tyre t-${o.compound}">${o.compound[0]}</span>
-      <span>${good ? `<b>Box lap ${o.stop_lap}</b> · window ${when}` : '<b>Stay out</b> — no gain from stopping'}</span>
+      <span>${good ? `<b>Box lap ${o.stop_lap}</b> · window ${when}` : '<b>Stay out</b> — no gain from stopping'}${src}</span>
       <span class="gain ${good ? '' : 'neg'}">${good ? '+' : ''}${o.gain.toFixed(1)} s</span></div>`;
   }).join('') : `<p class="fine">Not enough data on ${w.wet ? 'wet-weather tyres' : 'other compounds'} yet.</p>`;
   const fl = w.fastestLap;
@@ -551,9 +571,15 @@ function renderModel() {
         fl.holder ? ` (${esc(fl.holder)})` : ''} · pace ${lapTxt(fl.pace)}${need}</small></span>
       <span class="gain ${fl.status === 'free' ? '' : fl.status === 'tight' ? 'warn' : 'neg'}">+1 pt</span></div>`;
   }
+  const n = w.neutral;
+  const nHtml = n ? `<div class="box-opt sc ${n.vs_plan > 0 ? 'go' : ''}"><span class="tyre t-${n.compound}">${n.compound[0]}</span>
+      <span>${n.vs_plan > 0 ? `<b>Box now</b> under the ${n.kind} → ${n.compound}` : `<b>Stay out</b> under the ${n.kind}`}<small>${
+      n.vs_plan > 0 ? `${n.vs_plan.toFixed(1)} s better than the best green-flag plan` : `the planned stop is ${(-n.vs_plan).toFixed(1)} s better`
+      } · stop costs ${n.cost.toFixed(1)} s now · laps behind the ${n.kind} not counted</small></span>
+      <span class="gain ${n.vs_plan > 0 ? '' : 'neg'}">${n.vs_plan > 0 ? '+' : ''}${n.vs_plan.toFixed(1)} s</span></div>` : '';
   box.innerHTML = `<h3>${esc(d.tla)}<small>${selected ? '' : 'leader · '}${w.laps_left} laps to go</small></h3>
     <div class="now"><span class="tyre t-${w.compound}">${w.compound[0]}</span> ${w.compound} · ${w.age} laps old</div>
-    ${opts}${flHtml}${w.wet ? '<p class="fine">Wet race: options cover a fresh set of rain tyres. '
+    ${nHtml}${opts}${flHtml}${w.wet ? '<p class="fine">Wet race: options cover a fresh set of rain tyres. '
       + 'The switch to slicks depends on the weather and is not modelled.</p>' : ''}`;
 }
 
@@ -988,11 +1014,24 @@ function updateGauge() {
   gauge.mode.classList.toggle('on', on);
 }
 
+// Карту незачем рисовать 60 раз в секунду, когда она скрыта (другая вкладка) или
+// повтор на паузе: тогда кадр — только вскоре после данных или действий пользователя
+// (плавная камера и наведение успевают доехать).
+let activeUntil = 0;
+function poke() { activeUntil = performance.now() + 800; }
+for (const ev of ['pointerdown', 'pointermove', 'wheel', 'keydown', 'resize']) {
+  window.addEventListener(ev, poke, { passive: true });
+}
+
 let lastFrame = performance.now();
 function frame(now) {
   const dt = Math.min(250, now - lastFrame);
   lastFrame = now;
   if (feedEst != null && isPlaying()) feedEst += dt * playSpeed();
+  if (canvas.offsetParent === null || !(isPlaying() || now < activeUntil)) {
+    requestAnimationFrame(frame);
+    return;
+  }
 
   const dpr = window.devicePixelRatio || 1;
   const w = canvas.clientWidth, h = canvas.clientHeight;
